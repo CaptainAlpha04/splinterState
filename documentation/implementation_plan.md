@@ -18,7 +18,8 @@ The platform is designed as a lightweight, high-performance web application opti
 * **Map Dataset:** Natural Earth admin-1 (most detailed available) with present-day boundaries.
 * **Province Granularity:** All admin-1 regions worldwide (one province per admin-1 region).
 * **Capital Data:** National capitals (country-level) to anchor campaign setup and UI.
-* **Tiering Rule:** Strategic-power based. Province count is only a capped subdivision factor because admin-1 density is uneven across countries.
+* **Country Metadata:** REST Countries metadata is stored locally for ISO3 names, ISO2-derived flags, population, area, region, and subregion. Province count remains the map-painting unit, not the sole value metric.
+* **Tiering Rule:** Modern-content based. The United States and China are the only starting Empires. Other countries become Empires through conquest, formations, or mission-tree-style identity progression.
 * **Storage:** Local state only for MVP; multiplayer support as stubs.
 * **Rendering:** Hybrid UI with SVG map and Canvas initiative wheel.
 
@@ -87,9 +88,9 @@ interface PlayerState {
 The game progression relies entirely on a ticket-based economy that acts as both a gatekeeper and a score metric.
 
 * **The Baseline Safety Net:** If a player's wallet drops to zero, the campaign does not immediately end. The next betting window becomes constrained until the player earns or receives enough tickets through later rules.
-* **Country Entry Barriers:** Countries are locked behind buy-in thresholds tied to strategic power plus a small capped province subdivision factor.
+* **Country Entry Barriers:** Countries are locked behind buy-in thresholds tied to strategic power, population, area, and a small capped province subdivision factor.
 * *Kingdom Tier:* Low to medium buy-in.
-* *Empire / Hegemon Tier:* Requires substantially higher ticket reserves.
+* *Empire Tier:* Reserved for starting superpowers and countries that earn imperial status in play.
 
 
 * **The Double-or-Nothing Wagering Engine:** Players can place specific ticket wagers on individual conflicts during the pre-combat phase. A correct prediction returns $2 \times \text{wager}$. An incorrect prediction completely forfeits the wagered amount.
@@ -104,25 +105,35 @@ The simulation begins with campaign setup before the combat loop starts.
 ```
 
 * **Campaign Scope:** The player chooses World War (entire map), Continent War (one continent), or Regional War (one broad region). This locks the eligible country set and outer camera boundary for the campaign.
-* **Campaign Favorite:** Hovering a province shows province details. Clicking a province selects the controlling country and reveals country details. The player buys one campaign favorite; country price scales by province count and size tier.
+* **Campaign Favorite:** Hovering a province shows province details. Clicking a province selects the controlling country and reveals country details. The player buys one campaign favorite; country price scales by metadata-backed strategic value rather than raw province count.
 * **Dynamic Sidebar:** The sidebar only shows controls relevant to the current stage. The initiative wheel appears only when the player is viewing or resolving a specific war.
+
+#### Country Identity Progression
+
+Country content is driven by formation rules, not only by map ownership. Each country tracks its base ID, absorbed country IDs, absorbed governments, region, subregion, current color, and unlocked formations. After annexing a rival, the winner checks mission-tree-style formation rules.
+
+Examples:
+
+* Middle Eastern powers can form the **New Islamic Caliphate** after absorbing enough of the region.
+* Kazakhstan or Russia can proclaim a **Revived USSR** after consolidating the post-Soviet sphere.
+* Morocco can pursue **Andalusia** through Iberian expansion or a **North African Empire** through Maghrebi expansion.
+* Iran can become the **Persian Empire**, Turkey can restore the **Ottoman Porte**, and South Asian powers can form a **Greater Indian Union**.
+* If no bespoke formation is available, any country that has genuinely conquered enough territory can proclaim an empire-tier identity.
 
 #### Event Horizon (Global Standstill Checking + Event Modifiers)
 
 No military operations occur during this phase. Once the campaign favorite is selected, the engine scans all in-scope active countries, applies structural stability checks, and rolls temporary event modifiers that can increase or decrease initiative weight.
 
-| Tier | Strategic Power | Rebellion Probability | Separation Paradigm |
+| Tier | Trigger | Rebellion Probability | Separation Paradigm |
 | --- | --- | --- | --- |
-| **Kingdom** | Low strategic power | $1\% - 5\%$ | Stable. Minor localized impact. |
-| **Empire** | Medium-high strategic power | $25\%$ | Structural stress. Meaningful chance of civil war. |
-| **Hegemon** | Highest strategic power | Up to $50\%$ | Extreme fragility. High chance of breakaway factions. |
+| **Kingdom** | Starting and small conquered countries | $0\%$ | Stable. No strategic rebel checks. |
+| **Empire** | Starting US/China or countries that earned empire status | roughly $18\% - 35\%$ after phase one | Structural stress. One full rebel country may split away. |
 
 Each Event Horizon gives every active in-scope country a one-round initiative modifier from a named event. Positive events include local initiative, officer corps rallies, and golden mobilization. Negative events include border unrest, supply scandals, and state paralysis. The modifier is temporary and recalculated at the next Event Horizon.
 
-When a country fails its stability roll, one rebel group usually forms. The rebel group takes a percentage of the parent country's current provinces based on tier: small countries lose a tiny localized pocket, Empires lose a larger frontier block, and Hegemons can lose a major breakaway zone. The breakaway becomes a real country with its own government, strategic power, event modifier, special rebel momentum modifier, and valid map ownership.
+No rebels spawn in the first Event Horizon. After that, only Empire-scale countries roll for rebellion. A rebel country takes at least five provinces when possible and is capped by the size of the largest country the parent previously absorbed. Rebel ideology is derived from the parent state's absorbed governments, current government, and regional religious/cultural context. Examples include **Red Arabia**, **Islamic Revolutionaries of Persia**, and liberation-front style names.
 
-* **The Nemesis Pair Rule (Two-Way Fracturing):** If a country fails its stability roll and divides into exactly two components, the breakaway nation matches the dominant structural friction. For instance, a Communist country breaks into **[Country Name]** versus **Red [Country Name]**. These two specific entities are locked into an exclusive proxy war and cannot target outside entities until the civil war settles.
-* **The Anarchic Splinter Rule (Multi-Faction Fracturing):** If a Hegemon breaks into greater than two pieces, the pairing restriction is bypassed. All fractured shards are instantly flagged as open vulnerabilities on the global map.
+* **Forced Civil War Rule:** When rebels spawn, the parent and rebel state are automatically placed into war in the next War Selection phase. The player does not choose whether that civil war happens.
 
 #### War Matchmaking
 
@@ -130,7 +141,7 @@ The system iterates through all active in-scope entities to automatically map va
 
 * **The Monogamy Rule:** A country can never be assigned to more than one active war calculation simultaneously within a single round.
 * **The Adjacency Core:** Valid declarations of war can only occur between countries that share at least one contiguous, non-incinerated border province.
-* **Island / Naval Fallback:** If no land-border match exists for available in-scope countries, matchmaking may create an off-front war between otherwise available countries. This keeps island nations and isolated leftovers inside the elimination loop.
+* **Island / Naval Fallback:** If an isolated country has no land-border match, matchmaking may create an off-front war only against nearby capitals. Inland countries cannot randomly declare on distant states through this fallback.
 * **Scope Boundary Rule:** Countries outside the selected campaign scope are not eligible combatants.
 
 #### War Selection & Betting
@@ -155,7 +166,7 @@ $$W_C = P_C + M_{\text{Gov}} + (A_C \times 10) + K_C$$
 
 Where:
 
-* $P_C$: Strategic power plus a capped square-root province subdivision factor. Raw province count is not used directly because the map dataset subdivides countries unevenly.
+* $P_C$: Metadata-backed strategic power plus a capped square-root province subdivision factor. Raw province count is not used directly because the map dataset subdivides countries unevenly.
 * $M_{\text{Gov}}$: Fixed integer modifiers determined by government characteristics (e.g., $+10$ Army Morale under specific regimes).
 * $A_C$: Total number of permanent campaign-wide Army Camps held by the country.
 * $K_C$: The Capital Control Modifier. If a nation successfully occupies the opponent's starting capital province through nearest-border conquest, they receive a flat weight bonus of $+20$. The defender's weight drops by a corresponding margin.

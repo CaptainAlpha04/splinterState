@@ -1,15 +1,32 @@
 import { create } from "zustand";
-import type { Country } from "../engine/models/country";
+import type { Country, ReligiousDenomination } from "../engine/models/country";
 import type { GovernmentType } from "../engine/models/enums";
 import type { Province } from "../engine/models/province";
 import type { ActiveWar } from "../engine/models/war";
 import type { PlayerState } from "../engine/models/player";
 import { governmentModifier } from "../engine/rules/modifiers";
-import { resolveTier } from "../engine/rules/tiers";
 import { loadMapAssets, type CapitalRecord } from "../lib/data/loadMapAssets";
 import { runMatchmaking } from "../engine/mechanics/matchmaker";
+import { countryWheelBreakdown } from "../engine/mechanics/initiativeWheel";
 import { resolveCombat, resolveCombatTurn, type CombatOutcome, type CombatTurnOutcome } from "../engine/mechanics/combatResolution";
-import { createRng, nextInt, type RngState } from "../engine/rng/seededRng";
+import { createEntropySeed, createRng, nextInt, type RngState } from "../engine/rng/seededRng";
+import {
+  MODERN_EMPIRES,
+  applyCountryFormation,
+  buildMetadataIndex,
+  controlledDevelopmentScore,
+  countryTicketCost,
+  metadataFlag,
+  metadataName,
+  metadataRegion,
+  metadataSubregion,
+  modernStrategicPower,
+  religionForCountry,
+  religionModifier,
+  religionModifierLabel,
+  rebelName,
+  type CountryMetadataIndex,
+} from "../engine/content/countryContent";
 
 export type CampaignScale = "World War" | "Continent War" | "Regional War";
 export type CampaignStage =
@@ -20,6 +37,7 @@ export type CampaignStage =
   | "Betting"
   | "Combat"
   | "CombatResult"
+  | "CampaignWon"
   | "GameOver";
 
 export type CampaignScope = {
@@ -37,8 +55,8 @@ export type WarBet = {
 
 export type WarResult = {
   warId: string;
-  winnerId: string;
-  loserId: string;
+  winnerId: string | null;
+  loserId: string | null;
   bet: WarBet | null;
   wonBet: boolean | null;
   turns: CombatTurnOutcome[];
@@ -61,7 +79,13 @@ export type GameState = {
   lastCombatOutcome: CombatOutcome | null;
   warTurns: Record<string, CombatTurnOutcome[]>;
   completedWarResults: WarResult[];
+  countryPlacements: Record<string, number>;
+  campaignPhase: number;
+  forcedWars: ActiveWar[];
   rngState: RngState;
+  isResolvingTurn: boolean;
+  isAutoPlaying: boolean;
+  autoSpeed: number;
 
   initializeGame: () => Promise<void>;
   selectProvince: (provinceId: string | null) => void;
@@ -74,12 +98,37 @@ export type GameState = {
   placeWarBet: (predictedWinnerId: string, amount: number) => void;
   rollSelectedWarTurn: () => void;
   skipSelectedWar: () => void;
+  skipAllWars: () => void;
+  autoResolveSelectedWarChunk: () => void;
+  toggleAutoPlay: () => void;
+  setAutoSpeed: (speed: number) => void;
   continueAfterWar: () => void;
   resolveSelectedWar: () => void;
   resetCampaign: () => void;
 };
 
-const INITIAL_SEED = 8675309;
+function newCampaignRng() {
+  return createRng(createEntropySeed());
+}
+
+const TICKET_WALLET_KEY = "splinter-states-ticket-wallet";
+const BASE_TICKETS = 500;
+
+function normalizeTicketWallet(tickets: number) {
+  return Math.max(BASE_TICKETS, Math.round(tickets));
+}
+
+function loadTicketWallet() {
+  if (typeof window === "undefined") return BASE_TICKETS;
+  const stored = window.localStorage.getItem(TICKET_WALLET_KEY);
+  const parsed = stored ? Number(stored) : BASE_TICKETS;
+  return Number.isFinite(parsed) ? normalizeTicketWallet(parsed) : BASE_TICKETS;
+}
+
+function saveTicketWallet(tickets: number) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TICKET_WALLET_KEY, String(normalizeTicketWallet(tickets)));
+}
 const COUNTRY_NAMES: Record<string, string> = {
   USA: "United States",
   RUS: "Russia",
@@ -215,8 +264,7 @@ const STRATEGIC_POWER: Record<string, number> = {
 };
 
 function countryCost(country: Country): number {
-  const subdivisionTax = Math.min(90, Math.round(Math.sqrt(country.provinces.length) * 7));
-  return Math.max(25, country.strategicPower * 4 + subdivisionTax);
+  return countryTicketCost(country);
 }
 
 function displayName(countryId: string): string {
@@ -227,8 +275,35 @@ function flagFor(countryId: string): string {
   return FLAGS[countryId] ?? "⚑";
 }
 
-function strategicPowerFor(countryId: string, provinceCount: number): number {
-  return STRATEGIC_POWER[countryId] ?? Math.max(12, Math.min(34, Math.round(Math.sqrt(Math.max(1, provinceCount)) * 4)));
+const MAP_COLORS = [
+  "#2f5f8f", "#8e4f9f", "#2f7b4a", "#a66f2c", "#5f64a7", "#a34338",
+  "#3d897c", "#897742", "#7a4f7f", "#4f7c9e", "#76934a", "#9a5a66",
+  "#4d7350", "#8b6b3d", "#b4557a", "#528c5d", "#456fa3", "#a15d3a",
+  "#6f5eb0", "#3f8f95", "#9b8045", "#8a5171", "#597d3f", "#386b74",
+];
+
+function initialMapColor(countryId: string) {
+  let hash = 0;
+  for (let i = 0; i < countryId.length; i += 1) {
+    hash = countryId.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return MAP_COLORS[Math.abs(hash) % MAP_COLORS.length];
+}
+
+function normalizeRegion(countryId: string, region: string, subregion = "") {
+  if (CONTINENT_OVERRIDES[countryId]) return CONTINENT_OVERRIDES[countryId];
+  if (region === "Americas") {
+    return subregion === "South America" ? "South America" : "North America";
+  }
+  return region || "Unassigned";
+}
+
+function normalizeSubregion(countryId: string, subregion: string) {
+  return REGION_OVERRIDES[countryId] ?? (subregion || "Unassigned");
+}
+
+function strategicPowerFor(countryId: string, metadata: CountryMetadataIndex, provinceCount: number): number {
+  return modernStrategicPower(countryId, metadata, provinceCount);
 }
 
 function rebelPowerFor(parent: Country, rebelProvinceCount: number) {
@@ -237,34 +312,73 @@ function rebelPowerFor(parent: Country, rebelProvinceCount: number) {
 }
 
 function rebelGovernmentFor(parent: Country): GovernmentType {
+  const absorbed = parent.absorbedGovernments.filter(government => government !== parent.government);
+  if (absorbed.length > 0) return absorbed[0];
   if (parent.government === "Communism") return "Revolutionary";
   if (parent.government === "Revolutionary") return "Democracy";
-  if (parent.government === "Caliphate") return "Aristocracy";
+  if (parent.government === "Caliphate") return "Revolutionary";
+  if (parent.subregion === "Middle East" || parent.subregion === "Northern Africa") return "Caliphate";
   return "Revolutionary";
 }
 
+function rebelReligionFor(parent: Country, government: GovernmentType): ReligiousDenomination {
+  if (government === "Communism" || government === "Revolutionary") return "State Atheism";
+  if (government === "Caliphate") return parent.religion === "Shia Islam" ? "Shia Islam" : "Sunni Islam";
+  return parent.religion;
+}
+
 function rebellionChance(country: Country) {
-  if (country.provinces.length < 3) return 0;
+  if (country.provinces.length < 10) return 0;
   const tier = getCountryTier(country);
-  if (tier === "Hegemon") return Math.min(50, 32 + Math.round(country.provinces.length / 6));
-  if (tier === "Empire") return 25;
-  return Math.min(5, 1 + Math.floor(country.provinces.length / 18));
+  if (tier === "Empire") return Math.min(35, 18 + country.absorbedGovernments.length * 3);
+  return 0;
 }
 
 function rebelProvinceCount(country: Country, rngState: RngState) {
-  const tier = getCountryTier(country);
-  const base = tier === "Hegemon" ? 0.18 : tier === "Empire" ? 0.12 : 0.08;
-  const jitter = nextInt(rngState, 0, 8) / 100;
-  return Math.max(1, Math.min(country.provinces.length - 1, Math.round(country.provinces.length * (base + jitter))));
+  const base = 0.12 + nextInt(rngState, 0, 8) / 100;
+  const maxByAbsorbed = Math.max(5, country.largestAbsorbedProvinceCount || 5);
+  const desired = Math.round(country.provinces.length * base);
+  return Math.max(5, Math.min(country.provinces.length - 1, maxByAbsorbed, desired));
 }
 
-function takeRebelProvinces(country: Country, rngState: RngState) {
-  const shuffled = [...country.provinces];
-  for (let i = shuffled.length - 1; i > 0; i -= 1) {
+function takeRebelProvinces(country: Country, provinces: Record<string, Province>, rngState: RngState) {
+  const desiredCount = rebelProvinceCount(country, rngState);
+  const ownedProvinceIds = new Set(country.provinces);
+  let bestBlock: string[] = [];
+
+  const shuffledSeeds = [...country.provinces];
+  for (let i = shuffledSeeds.length - 1; i > 0; i -= 1) {
     const j = nextInt(rngState, 0, i);
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    [shuffledSeeds[i], shuffledSeeds[j]] = [shuffledSeeds[j], shuffledSeeds[i]];
   }
-  return shuffled.slice(0, rebelProvinceCount(country, rngState));
+
+  shuffledSeeds.forEach(seedId => {
+    if (seedId === country.capitalProvinceId && country.provinces.length > desiredCount + 4) return;
+    const block: string[] = [];
+    const visited = new Set<string>([seedId]);
+    const queue = [seedId];
+
+    while (queue.length > 0 && block.length < desiredCount) {
+      const currentId = queue.shift()!;
+      if (ownedProvinceIds.has(currentId)) {
+        block.push(currentId);
+      }
+
+      const neighbors = provinces[currentId]?.adjacentProvinceIds ?? [];
+      neighbors.forEach(neighborId => {
+        if (!visited.has(neighborId) && ownedProvinceIds.has(neighborId)) {
+          visited.add(neighborId);
+          queue.push(neighborId);
+        }
+      });
+    }
+
+    if (block.length > bestBlock.length) {
+      bestBlock = block;
+    }
+  });
+
+  return bestBlock.length >= Math.min(5, desiredCount) ? bestBlock.slice(0, desiredCount) : [];
 }
 
 function eventLabel(modifier: number) {
@@ -285,8 +399,9 @@ function plausibleGovernment(countryId: string): GovernmentType {
   return "Democracy";
 }
 
-function countrySpecialModifiers(countryId: string, provinceCount: number) {
+function countrySpecialModifiers(countryId: string, strategicPower: number, population: number, area: number) {
   const modifiers = [];
+  const developmentBand = strategicPower * 2 + Math.max(0, Math.log10(Math.max(1, population)) - 6) * 20 + Math.max(0, Math.log10(Math.max(1, area)) - 4) * 12;
   if (countryId === "USA") {
     modifiers.push({ label: "Expeditionary Reach", value: 14, description: "Global logistics increase initiative in every theater." });
   } else if (countryId === "RUS") {
@@ -299,10 +414,12 @@ function countrySpecialModifiers(countryId: string, provinceCount: number) {
     modifiers.push({ label: "Maritime Doctrine", value: 7, description: "Naval posture improves initiative around coasts." });
   } else if (countryId === "BRA" || countryId === "CAN" || countryId === "AUS") {
     modifiers.push({ label: "Resource Hinterland", value: 7, description: "Strategic resources stabilize long wars." });
-  } else if (strategicPowerFor(countryId, provinceCount) >= 52) {
-    modifiers.push({ label: "Continental Mass", value: 8, description: "Large territory creates operational resilience." });
-  } else if (strategicPowerFor(countryId, provinceCount) >= 30) {
-    modifiers.push({ label: "Regional Command", value: 5, description: "Medium-scale administration improves mobilization." });
+  } else if (developmentBand >= 185) {
+    modifiers.push({ label: "Continental Command", value: 12, description: "Major population, land, and logistics create a continental war machine." });
+  } else if (developmentBand >= 150) {
+    modifiers.push({ label: "Major Regional Command", value: 10, description: "A serious regional power can mobilize across multiple fronts." });
+  } else if (developmentBand >= 115) {
+    modifiers.push({ label: "Regional Command", value: 7, description: "Medium-scale administration improves mobilization." });
   } else {
     modifiers.push({ label: "Compact Defense", value: 3, description: "Small territory coordinates defensive response quickly." });
   }
@@ -384,12 +501,12 @@ const REGION_OVERRIDES: Record<string, string> = {
   EGY: "North Africa",
 };
 
-function continentForCountry(countryId: string, capital: CapitalRecord | null): string {
-  return CONTINENT_OVERRIDES[countryId] ?? continentFromCapital(capital);
+function continentForCountry(countryId: string, country: Country | undefined, capital: CapitalRecord | null): string {
+  return CONTINENT_OVERRIDES[countryId] ?? country?.region ?? continentFromCapital(capital);
 }
 
-function regionForCountry(countryId: string, capital: CapitalRecord | null): string {
-  return REGION_OVERRIDES[countryId] ?? regionFromCapital(capital);
+function regionForCountry(countryId: string, country: Country | undefined, capital: CapitalRecord | null): string {
+  return REGION_OVERRIDES[countryId] ?? country?.subregion ?? regionFromCapital(capital);
 }
 
 function continentFromCapital(capital: CapitalRecord | null): string {
@@ -448,8 +565,8 @@ function buildScope(scale: CampaignScale, selectedCountryId: string | null, coun
 
   const selectedCapital = activeCapitalFor(selectedCountryId, capitals);
   const classifier = scale === "Continent War" ? continentForCountry : regionForCountry;
-  const label = classifier(selectedCountryId, selectedCapital);
-  const eligibleCountryIds = aliveCountryIds.filter(countryId => classifier(countryId, activeCapitalFor(countryId, capitals)) === label);
+  const label = classifier(selectedCountryId, countries[selectedCountryId], selectedCapital);
+  const eligibleCountryIds = aliveCountryIds.filter(countryId => classifier(countryId, countries[countryId], activeCapitalFor(countryId, capitals)) === label);
 
   return {
     scale,
@@ -488,6 +605,18 @@ function describeCombatTurn(turn: CombatTurnOutcome, countries: Record<string, C
     return `${active} rolled 0 and built an army camp.`;
   }
 
+  if (turn.action === "interceptor") {
+    return `${active} rolled 0 and deployed an interceptor shield around its command network.`;
+  }
+
+  if (turn.action === "support") {
+    return `${active} rolled 0 and rallied public support for +4 event momentum.`;
+  }
+
+  if (turn.action === "nuke") {
+    return `${active} rolled 0, launched a tactical nuke, fallout rolled ${turn.falloutRoll ?? 0}, and burned ${turn.incineratedProvinceIds.length} province(s): ${taken}.`;
+  }
+
   if (turn.action === "counter") {
     return `${active} pressed into ${target}, rolled ${turn.roll}, and counter operations cost it ${turn.capturedProvinces.length} province(s): ${taken}.`;
   }
@@ -495,16 +624,300 @@ function describeCombatTurn(turn: CombatTurnOutcome, countries: Record<string, C
   return `${active} attacked ${target}, rolled +${turn.roll}, and captured ${turn.capturedProvinces.length} province(s): ${taken}.`;
 }
 
+function dominantWarCountry(attacker: Country, defender: Country) {
+  const attackerWheel = countryWheelBreakdown(attacker, attacker.provinces.length, attacker.provinces.includes(defender.capitalProvinceId)).total;
+  const defenderWheel = countryWheelBreakdown(defender, defender.provinces.length, defender.provinces.includes(attacker.capitalProvinceId)).total;
+  const attackerScore = attackerWheel * 2 + attacker.provinces.length * 4 + attacker.strategicPower;
+  const defenderScore = defenderWheel * 2 + defender.provinces.length * 4 + defender.strategicPower;
+  return attackerScore >= defenderScore ? attacker.id : defender.id;
+}
+
+function warDominance(attacker: Country, defender: Country) {
+  const attackerWheel = countryWheelBreakdown(attacker, attacker.provinces.length, attacker.provinces.includes(defender.capitalProvinceId)).total;
+  const defenderWheel = countryWheelBreakdown(defender, defender.provinces.length, defender.provinces.includes(attacker.capitalProvinceId)).total;
+  const total = Math.max(1, attackerWheel + defenderWheel);
+  const attackerShare = attackerWheel / total;
+  const defenderShare = defenderWheel / total;
+  return attackerShare >= defenderShare
+    ? { countryId: attacker.id, share: attackerShare }
+    : { countryId: defender.id, share: defenderShare };
+}
+
+function incineratedInWar(turns: CombatTurnOutcome[]) {
+  return Array.from(new Set(turns.flatMap(turn => turn.incineratedProvinceIds)));
+}
+
+function diceOnlyLog(turn: CombatTurnOutcome, countries: Record<string, Country>) {
+  const active = countries[turn.activeCountryId]?.name ?? turn.activeCountryId;
+  const target = countries[turn.targetCountryId]?.name ?? turn.targetCountryId;
+  const roll = turn.roll > 0 ? `+${turn.roll}` : String(turn.roll);
+  if (turn.roll === 0) return `${active} rolled 0. Special orders are resolving against ${target}.`;
+  return `${active} rolled ${roll}. Orders are resolving against ${target}.`;
+}
+
+type TurnResolution = {
+  countries: Record<string, Country>;
+  provinces: Record<string, Province>;
+  rngState: RngState;
+  activeWars: ActiveWar[];
+  selectedWarId: string | null;
+  currentBet: WarBet | null;
+  lastCombatOutcome: CombatOutcome | null;
+  player: PlayerState;
+  warTurns: Record<string, CombatTurnOutcome[]>;
+  completedWarResults: WarResult[];
+  countryPlacements: Record<string, number>;
+  stage: CampaignStage;
+  logs: string[];
+  turn: CombatTurnOutcome;
+};
+
+function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): TurnResolution {
+  const attacker = { ...state.countries[war.attackerId] };
+  const defender = { ...state.countries[war.defenderId] };
+  const adjacencyMap: Record<string, string[]> = {};
+  Object.values(state.provinces).forEach(province => {
+    adjacencyMap[province.id] = province.adjacentProvinceIds;
+  });
+
+  const rngState = { ...state.rngState };
+  const turn = resolveCombatTurn(attacker, defender, adjacencyMap, rngState);
+  const countries = {
+    ...state.countries,
+    [attacker.id]: attacker,
+    [defender.id]: defender,
+  };
+  let activeWars = state.activeWars;
+  let player = state.player;
+  let stage: CampaignStage = "Combat";
+  let currentBet = state.currentBet;
+  let selectedWarId = state.selectedWarId;
+  const warTurns = {
+    ...state.warTurns,
+    [war.id]: [...(state.warTurns[war.id] ?? []), turn],
+  };
+  let completedWarResults = state.completedWarResults;
+  let countryPlacements = state.countryPlacements;
+  let lastCombatOutcome = state.lastCombatOutcome;
+  const turnsForWar = warTurns[war.id];
+  const dominance = turnsForWar.length >= 150 ? warDominance(countries[war.attackerId], countries[war.defenderId]) : null;
+  const resolvedWinnerId = turn.winnerId ?? (dominance && dominance.share >= 0.85 ? dominance.countryId : null);
+  const endedByDominance = !turn.winnerId && Boolean(resolvedWinnerId);
+  const endedByStalemate = !turn.winnerId && !resolvedWinnerId && Boolean(dominance);
+
+  logs.push(describeCombatTurn(turn, countries, state.provinces));
+
+  if (resolvedWinnerId) {
+    const loserId = resolvedWinnerId === attacker.id ? defender.id : attacker.id;
+    if (endedByDominance) {
+      countries[resolvedWinnerId] = {
+        ...countries[resolvedWinnerId],
+        provinces: Array.from(new Set([...countries[resolvedWinnerId].provinces, ...countries[loserId].provinces])),
+      };
+      countries[loserId] = { ...countries[loserId], provinces: [] };
+    }
+
+    const winner = countries[resolvedWinnerId];
+    const loser = countries[loserId];
+    const loserStartingProvinceCount = state.countries[loserId]?.provinces.length ?? loser.provinces.length;
+    const inheritedGovernments = Array.from(new Set([...winner.absorbedGovernments, loser.government, ...loser.absorbedGovernments]));
+    const inheritedCountryIds = Array.from(new Set([...winner.absorbedCountryIds, loser.baseId, ...loser.absorbedCountryIds]));
+    const enforcedReligion = winner.religion;
+    const formationResult = applyCountryFormation({
+      ...winner,
+      armyCampsCount: winner.armyCampsCount + loser.armyCampsCount,
+      population: winner.population + loser.population,
+      area: winner.area + loser.area,
+      religion: enforcedReligion,
+      absorbedGovernments: inheritedGovernments,
+      absorbedCountryIds: inheritedCountryIds,
+      largestAbsorbedProvinceCount: Math.max(winner.largestAbsorbedProvinceCount, loser.largestAbsorbedProvinceCount, loserStartingProvinceCount),
+      strategicPower: Math.max(winner.strategicPower, winner.strategicPower + Math.max(1, Math.round(loser.strategicPower * 0.12))),
+    }, countries);
+
+    countries[resolvedWinnerId] = formationResult.country;
+    countries[loserId] = { ...loser, isAlive: false, provinces: [] };
+    const aliveAfterElimination = state.campaignScope
+      ? state.campaignScope.eligibleCountryIds.filter(countryId => countries[countryId]?.isAlive && countryId !== loserId).length
+      : Object.values(countries).filter(country => country.isAlive && country.id !== loserId).length;
+    countryPlacements = {
+      ...state.countryPlacements,
+      [loserId]: Math.max(2, aliveAfterElimination + 1),
+    };
+    const activeWarBets = new Map(state.player.activeWarBets);
+    const bet = activeWarBets.get(war.id) ?? null;
+    activeWarBets.delete(war.id);
+    const wonBet = bet ? bet.predictedWinnerId === resolvedWinnerId : null;
+    const nextTickets = bet
+      ? (wonBet ? state.player.tickets + bet.amount * 2 : state.player.tickets - bet.amount)
+      : state.player.tickets;
+    const result: WarResult = {
+      warId: war.id,
+      winnerId: resolvedWinnerId,
+      loserId,
+      bet,
+      wonBet,
+      turns: warTurns[war.id],
+    };
+
+    completedWarResults = [...state.completedWarResults, result];
+    activeWars = state.activeWars.filter(candidate => candidate.id !== war.id);
+    player = { ...state.player, tickets: Math.max(0, nextTickets), activeWarBets };
+    saveTicketWallet(player.tickets);
+    currentBet = null;
+    selectedWarId = activeWars[0]?.id ?? null;
+    lastCombatOutcome = {
+      attackerId: attacker.id,
+      defenderId: defender.id,
+      winnerId: resolvedWinnerId,
+      rounds: warTurns[war.id].map(round => ({
+        activeCountryId: round.activeCountryId,
+        roll: round.roll,
+        capturedProvinces: round.capturedProvinces,
+      })),
+    };
+    logs.push(`${countries[resolvedWinnerId].name} won the war after ${warTurns[war.id].length} rolls${endedByDominance ? " by dominance" : ""}.`);
+    if (formationResult.formationName) {
+      logs.push(`${countries[resolvedWinnerId].name} proclaimed a new national destiny: ${formationResult.formationName}.`);
+    }
+    if (winner.religion !== loser.religion) {
+      logs.push(`${countries[resolvedWinnerId].name} enforced ${enforcedReligion} across annexed ${loser.name} territories.`);
+    }
+    if (bet) {
+      logs.push(wonBet ? `Bet won. Payout: ${bet.amount * 2} tickets.` : `Bet lost. Stake forfeited: ${bet.amount} tickets.`);
+      if (nextTickets <= 0) {
+        logs.push("Wallet is empty. Next bets must be earned from future payouts or safety-net rules.");
+      }
+    }
+    stage = activeWars.length > 0 ? "WarSelection" : "CombatResult";
+  } else if (endedByStalemate && dominance) {
+    const activeWarBets = new Map(state.player.activeWarBets);
+    const bet = activeWarBets.get(war.id) ?? null;
+    activeWarBets.delete(war.id);
+    const result: WarResult = {
+      warId: war.id,
+      winnerId: null,
+      loserId: null,
+      bet,
+      wonBet: null,
+      turns: warTurns[war.id],
+    };
+
+    completedWarResults = [...state.completedWarResults, result];
+    activeWars = state.activeWars.filter(candidate => candidate.id !== war.id);
+    player = { ...state.player, activeWarBets };
+    currentBet = null;
+    selectedWarId = activeWars[0]?.id ?? null;
+    lastCombatOutcome = {
+      attackerId: attacker.id,
+      defenderId: defender.id,
+      winnerId: null,
+      rounds: warTurns[war.id].map(round => ({
+        activeCountryId: round.activeCountryId,
+        roll: round.roll,
+        capturedProvinces: round.capturedProvinces,
+      })),
+    };
+    logs.push(`${attacker.name} and ${defender.name} reached a 150-roll border settlement. ${countries[dominance.countryId].name} led at ${Math.round(dominance.share * 100)}%, below the 85% annexation threshold.`);
+    if (bet) {
+      logs.push(`War bet on ${state.countries[bet.predictedWinnerId]?.name ?? bet.predictedWinnerId} was returned after stalemate.`);
+    }
+    stage = activeWars.length > 0 ? "WarSelection" : "CombatResult";
+  }
+
+  const provinces = syncProvinceOwners(state.provinces, countries);
+  turn.incineratedProvinceIds.forEach(provinceId => {
+    const province = provinces[provinceId];
+    if (province) {
+      provinces[provinceId] = { ...province, isIncinerated: true };
+    }
+  });
+  if (resolvedWinnerId) {
+    incineratedInWar(warTurns[war.id]).forEach(provinceId => {
+      const province = provinces[provinceId];
+      if (province) {
+        provinces[provinceId] = { ...province, isIncinerated: false };
+      }
+    });
+  }
+
+  return {
+    countries,
+    provinces,
+    rngState,
+    activeWars,
+    selectedWarId,
+    currentBet,
+    lastCombatOutcome,
+    player,
+    warTurns,
+    completedWarResults,
+    countryPlacements,
+    stage,
+    logs,
+    turn,
+  };
+}
+
+function campaignFavoriteRank(favoriteId: string | null, winnerId: string | null, completedWarResults: WarResult[]) {
+  if (!favoriteId || !winnerId) return null;
+  if (favoriteId === winnerId) return 1;
+  const eliminatedOrder = completedWarResults
+    .map(result => result.loserId)
+    .filter((loserId): loserId is string => Boolean(loserId));
+  const eliminationIndex = eliminatedOrder.indexOf(favoriteId);
+  if (eliminationIndex < 0) return null;
+  const survivorsAfterFavorite = eliminatedOrder.length - eliminationIndex;
+  return survivorsAfterFavorite + 1;
+}
+
+function campaignFavoritePlacement(favoriteId: string | null, winnerId: string | null, placements: Record<string, number>) {
+  if (!favoriteId) return null;
+  if (favoriteId === winnerId) return 1;
+  return placements[favoriteId] ?? null;
+}
+
+function campaignPayoutForRank(stake: number, rank: number | null) {
+  if (stake <= 0 || !rank || rank > 3) return 0;
+  if (rank === 1) return stake * 2;
+  if (rank === 2) return Math.round(stake * 1.5);
+  return stake;
+}
+
+function campaignConclusionLog(rank: number | null, payout: number, favorite: Country | null | undefined) {
+  if (!favorite) return "Campaign ended without a favorite payout.";
+  if (rank === 1) return `${favorite.name} ranked first. Campaign payout: ${payout} tickets.`;
+  if (rank === 2) return `${favorite.name} ranked second. Campaign payout: ${payout} tickets.`;
+  if (rank === 3) return `${favorite.name} ranked third. Campaign stake returned: ${payout} tickets.`;
+  return `${favorite.name} fell outside the top three. Campaign stake lost.`;
+}
+
 export function getCountryCost(country: Country): number {
   return countryCost(country);
 }
 
 export function getCountryTier(country: Country) {
-  return resolveTier(country.strategicPower, country.id);
+  const development = controlledDevelopmentScore(country);
+  if (development >= 520) return "Hegemon";
+  if (MODERN_EMPIRES.has(country.baseId) && country.campaignPhaseBorn === 0) return "Empire";
+  if (development >= 290 || country.unlockedFormations.length > 0) return "Empire";
+  return "Kingdom";
 }
 
 export function getCountrySpecialModifierTotal(country: Country) {
   return country.specialModifiers.reduce((total, modifier) => total + modifier.value, 0);
+}
+
+export function getCountryDevelopmentScore(country: Country) {
+  return controlledDevelopmentScore(country);
+}
+
+export function getCountryReligionModifier(country: Country) {
+  return religionModifier(country.religion);
+}
+
+export function getCountryReligionModifierLabel(country: Country) {
+  return religionModifierLabel(country.religion);
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -517,6 +930,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   player: {
     tickets: 500,
     campaignFavoriteCountryId: null,
+    campaignStake: 0,
     activeWarBets: new Map(),
   },
   logs: [],
@@ -528,11 +942,19 @@ export const useGameStore = create<GameState>((set, get) => ({
   lastCombatOutcome: null,
   warTurns: {},
   completedWarResults: [],
-  rngState: createRng(INITIAL_SEED),
+  countryPlacements: {},
+  campaignPhase: 0,
+  forcedWars: [],
+  rngState: newCampaignRng(),
+  isResolvingTurn: false,
+  isAutoPlaying: false,
+  autoSpeed: 1,
 
   initializeGame: async () => {
     const assets = await loadMapAssets();
-    const rngState = createRng(INITIAL_SEED);
+    const rngState = newCampaignRng();
+    const walletTickets = loadTicketWallet();
+    const metadata = buildMetadataIndex(assets.metadata);
 
     const provinceMap: Record<string, Province> = {};
     assets.provinces.forEach(p => {
@@ -549,15 +971,32 @@ export const useGameStore = create<GameState>((set, get) => ({
     const countryMap: Record<string, Country> = {};
     assets.countries.forEach(c => {
       const government = plausibleGovernment(c.id);
+      const record = metadata[c.id];
+      const strategicPower = strategicPowerFor(c.id, metadata, c.provinceIds.length);
+      const region = normalizeRegion(c.id, metadataRegion(c.id, metadata), metadataSubregion(c.id, metadata));
+      const subregion = normalizeSubregion(c.id, metadataSubregion(c.id, metadata));
       countryMap[c.id] = {
         id: c.id,
-        name: displayName(c.id),
-        flag: flagFor(c.id),
+        baseId: c.id,
+        name: metadataName(c.id, metadata),
+        flag: metadataFlag(c.id, metadata),
+        mapColor: initialMapColor(c.id),
         provinces: c.provinceIds,
-        strategicPower: strategicPowerFor(c.id, c.provinceIds.length),
+        initialProvinceCount: c.provinceIds.length,
+        strategicPower,
+        population: record?.population ?? 0,
+        area: record?.area ?? 0,
+        region,
+        subregion,
+        absorbedGovernments: [government],
+        absorbedCountryIds: [c.id],
+        unlockedFormations: [],
+        largestAbsorbedProvinceCount: 0,
+        campaignPhaseBorn: 0,
         capitalProvinceId: c.capitalProvinceId,
         government,
-        specialModifiers: countrySpecialModifiers(c.id, c.provinceIds.length),
+        religion: religionForCountry(c.id, region, subregion),
+        specialModifiers: countrySpecialModifiers(c.id, strategicPower, record?.population ?? 0, record?.area ?? 0),
         armyCampsCount: 0,
         eventModifier: 0,
         isAlive: c.id !== "ATA",
@@ -579,10 +1018,17 @@ export const useGameStore = create<GameState>((set, get) => ({
       lastCombatOutcome: null,
       warTurns: {},
       completedWarResults: [],
+      countryPlacements: {},
+      campaignPhase: 0,
+      forcedWars: [],
       rngState,
+      isResolvingTurn: false,
+      isAutoPlaying: false,
+      autoSpeed: get().autoSpeed,
       player: {
-        tickets: 500,
+        tickets: walletTickets,
         campaignFavoriteCountryId: null,
+        campaignStake: 0,
         activeWarBets: new Map(),
       },
       logs: ["Map loaded. Choose a campaign scale."],
@@ -623,13 +1069,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
 
     const campaignScope = buildScope(state.campaignScope.scale, countryId, state.countries, state.capitals);
+    const nextTickets = state.player.tickets - cost;
+    saveTicketWallet(nextTickets);
 
     set({
       campaignScope,
       player: {
         ...state.player,
-        tickets: state.player.tickets - cost,
+        tickets: nextTickets,
         campaignFavoriteCountryId: countryId,
+        campaignStake: cost,
       },
       selectedCountryId: countryId,
       stage: "EventHorizon",
@@ -646,7 +1095,9 @@ export const useGameStore = create<GameState>((set, get) => ({
     let campaignScope = state.campaignScope;
     const logs = [...state.logs, "Event horizon triggered."];
     const rebelCountryIds: string[] = [];
+    const forcedWars: ActiveWar[] = [];
     let rebellionsThisHorizon = 0;
+    const rebelsAllowed = state.campaignPhase > 0;
 
     state.campaignScope.eligibleCountryIds.forEach(countryId => {
       const country = countries[countryId];
@@ -660,24 +1111,38 @@ export const useGameStore = create<GameState>((set, get) => ({
 
       const updatedCountry = countries[countryId];
       const chance = rebellionChance(updatedCountry);
-      if (rebellionsThisHorizon < 3 && chance > 0 && nextInt(rngState, 1, 100) <= chance) {
-        const rebelProvinceIds = takeRebelProvinces(updatedCountry, rngState);
+      if (rebelsAllowed && rebellionsThisHorizon < 3 && chance > 0 && nextInt(rngState, 1, 100) <= chance) {
+        const rebelProvinceIds = takeRebelProvinces(updatedCountry, state.provinces, rngState);
         if (rebelProvinceIds.length > 0 && rebelProvinceIds.length < updatedCountry.provinces.length) {
           const rebelId = `REB_${countryId}_${state.logs.length}_${rebelCountryIds.length}`;
           const rebelGovernment = rebelGovernmentFor(updatedCountry);
+          const rebelReligion = rebelReligionFor(updatedCountry, rebelGovernment);
           const rebelCountry: Country = {
             id: rebelId,
-            name: `${updatedCountry.name} Rebels`,
+            baseId: rebelId,
+            name: rebelName(updatedCountry, rebelGovernment),
             flag: "⚑",
+            mapColor: initialMapColor(rebelId),
             provinces: rebelProvinceIds,
+            initialProvinceCount: rebelProvinceIds.length,
             strategicPower: rebelPowerFor(updatedCountry, rebelProvinceIds.length),
+            population: Math.round(updatedCountry.population * (rebelProvinceIds.length / Math.max(1, updatedCountry.provinces.length))),
+            area: Math.round(updatedCountry.area * (rebelProvinceIds.length / Math.max(1, updatedCountry.provinces.length))),
+            region: updatedCountry.region,
+            subregion: updatedCountry.subregion,
+            absorbedGovernments: [rebelGovernment],
+            absorbedCountryIds: [rebelId],
+            unlockedFormations: [],
+            largestAbsorbedProvinceCount: 0,
+            campaignPhaseBorn: state.campaignPhase,
             capitalProvinceId: rebelProvinceIds[0],
             government: rebelGovernment,
+            religion: rebelReligion,
             specialModifiers: [
               {
-                label: "Insurgent Momentum",
-                value: 9,
-                description: "A fresh breakaway force receives early initiative.",
+                label: religionModifierLabel(rebelReligion),
+                value: Math.max(7, religionModifier(rebelReligion)),
+                description: "The breakaway regime uses faith and ideology to mobilize quickly.",
               },
             ],
             armyCampsCount: 0,
@@ -692,8 +1157,16 @@ export const useGameStore = create<GameState>((set, get) => ({
           };
           countries[rebelId] = rebelCountry;
           rebelCountryIds.push(rebelId);
+          forcedWars.push({
+            id: `${countryId}_civil_${rebelId}_${state.campaignPhase}`,
+            attackerId: countryId,
+            defenderId: rebelId,
+            attackerOccupiedCapital: false,
+            defenderOccupiedCapital: false,
+            incineratedProvinceIds: [],
+          });
           rebellionsThisHorizon += 1;
-          logs.push(`${rebelCountry.name} broke away from ${updatedCountry.name}, seizing ${rebelProvinceIds.length} province(s).`);
+          logs.push(`${rebelCountry.name} broke away from ${updatedCountry.name}, seizing ${rebelProvinceIds.length} province(s). Civil war is locked in.`);
         }
       }
     });
@@ -718,6 +1191,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       lastCombatOutcome: null,
       warTurns: {},
       completedWarResults: [],
+      forcedWars,
+      campaignPhase: state.campaignPhase + 1,
       logs,
     });
     get().generateWars();
@@ -736,31 +1211,67 @@ export const useGameStore = create<GameState>((set, get) => ({
     const scopedAliveIds = Object.keys(scopedCountries);
     if (scopedAliveIds.length <= 1) {
       const winnerId = scopedAliveIds[0] ?? null;
+      const countryPlacements = winnerId ? { ...state.countryPlacements, [winnerId]: 1 } : state.countryPlacements;
+      const rank = campaignFavoritePlacement(state.player.campaignFavoriteCountryId, winnerId, countryPlacements);
+      const payout = campaignPayoutForRank(state.player.campaignStake, rank);
+      const favorite = state.player.campaignFavoriteCountryId ? state.countries[state.player.campaignFavoriteCountryId] : null;
+      const nextTickets = state.player.tickets + payout;
+      saveTicketWallet(nextTickets);
       set({
         activeWars: [],
         selectedWarId: null,
-        stage: winnerId === state.player.campaignFavoriteCountryId ? "CombatResult" : "GameOver",
-        logs: [...state.logs, winnerId ? `${state.countries[winnerId].name} is the last country standing.` : "No countries remain in scope."],
+        stage: winnerId === state.player.campaignFavoriteCountryId ? "CampaignWon" : "GameOver",
+        player: {
+          ...state.player,
+          tickets: nextTickets,
+          campaignStake: 0,
+        },
+        countryPlacements,
+        logs: [
+          ...state.logs,
+          winnerId ? `${state.countries[winnerId].name} is the last country standing.` : "No countries remain in scope.",
+          campaignConclusionLog(rank, payout, favorite),
+        ],
       });
       return;
     }
 
     const rngState = { ...state.rngState };
-    const result = runMatchmaking(scopedCountries, state.provinces, [], rngState, 6);
+    const forcedWars = state.forcedWars.filter(war => scopedCountries[war.attackerId]?.isAlive && scopedCountries[war.defenderId]?.isAlive);
+    const result = runMatchmaking(scopedCountries, state.provinces, forcedWars, rngState, 6, state.capitals);
+    let activeWars = [...forcedWars, ...result.newWars];
+    if (activeWars.length === 0 && scopedAliveIds.length > 1) {
+      const contenders = scopedAliveIds
+        .map(countryId => scopedCountries[countryId])
+        .filter(Boolean)
+        .sort((a, b) => controlledDevelopmentScore(b) - controlledDevelopmentScore(a));
+      if (contenders[0] && contenders[1]) {
+        activeWars = [{
+          id: `${contenders[0].id}_vs_${contenders[1].id}_${Date.now()}`,
+          attackerId: contenders[0].id,
+          defenderId: contenders[1].id,
+          attackerOccupiedCapital: false,
+          defenderOccupiedCapital: false,
+          incineratedProvinceIds: [],
+        }];
+      }
+    }
     const logs = [...state.logs];
-    if (result.newWars.length === 0) {
+    if (activeWars.length === 0) {
       logs.push("No in-scope border wars erupted.");
     } else {
-      result.newWars.forEach(war => {
-        logs.push(`War erupted: ${state.countries[war.attackerId].name} vs ${state.countries[war.defenderId].name}.`);
+      activeWars.forEach(war => {
+        const isForcedCivilWar = forcedWars.some(forced => forced.id === war.id);
+        logs.push(`${isForcedCivilWar ? "Civil war ignited" : "War erupted"}: ${state.countries[war.attackerId].name} vs ${state.countries[war.defenderId].name}.`);
       });
     }
 
     set({
-      activeWars: result.newWars,
-      selectedWarId: result.newWars[0]?.id ?? null,
+      activeWars,
+      selectedWarId: activeWars[0]?.id ?? null,
       warTurns: {},
       completedWarResults: [],
+      forcedWars: [],
       rngState,
       logs,
     });
@@ -796,107 +1307,199 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   rollSelectedWarTurn: () => {
     const state = get();
+    if (state.isResolvingTurn) return;
     const war = state.activeWars.find(candidate => candidate.id === state.selectedWarId);
     if (!war) return;
 
-    const attacker = { ...state.countries[war.attackerId] };
-    const defender = { ...state.countries[war.defenderId] };
-    const adjacencyMap: Record<string, string[]> = {};
-    Object.values(state.provinces).forEach(province => {
-      adjacencyMap[province.id] = province.adjacentProvinceIds;
-    });
-
-    const rngState = { ...state.rngState };
-    const turn = resolveCombatTurn(attacker, defender, adjacencyMap, rngState);
-    const countries = {
-      ...state.countries,
-      [attacker.id]: attacker,
-      [defender.id]: defender,
-    };
-    let activeWars = state.activeWars;
-    let player = state.player;
-    let stage: CampaignStage = "Combat";
-    let currentBet = state.currentBet;
-    let selectedWarId = state.selectedWarId;
-    const logs = [...state.logs, describeCombatTurn(turn, countries, state.provinces)];
-    const warTurns = {
-      ...state.warTurns,
-      [war.id]: [...(state.warTurns[war.id] ?? []), turn],
-    };
-    let completedWarResults = state.completedWarResults;
-    let lastCombatOutcome = state.lastCombatOutcome;
-
-    if (turn.winnerId) {
-      const loserId = turn.winnerId === attacker.id ? defender.id : attacker.id;
-      countries[loserId] = { ...countries[loserId], isAlive: false, provinces: [] };
-      const bet = state.player.activeWarBets.get(war.id) ?? null;
-      const wonBet = bet ? bet.predictedWinnerId === turn.winnerId : null;
-      const nextTickets = bet
-        ? (wonBet ? state.player.tickets + bet.amount * 2 : state.player.tickets - bet.amount)
-        : state.player.tickets;
-      const result: WarResult = {
-        warId: war.id,
-        winnerId: turn.winnerId,
-        loserId,
-        bet,
-        wonBet,
-        turns: warTurns[war.id],
-      };
-
-      completedWarResults = [...state.completedWarResults, result];
-      activeWars = state.activeWars.filter(candidate => candidate.id !== war.id);
-      player = { ...state.player, tickets: Math.max(0, nextTickets) };
-      currentBet = null;
-      selectedWarId = activeWars[0]?.id ?? null;
-      lastCombatOutcome = {
-        attackerId: attacker.id,
-        defenderId: defender.id,
-        winnerId: turn.winnerId,
-        rounds: warTurns[war.id].map(round => ({
-          activeCountryId: round.activeCountryId,
-          roll: round.roll,
-          capturedProvinces: round.capturedProvinces,
-        })),
-      };
-      logs.push(`${countries[turn.winnerId].name} won the war after ${warTurns[war.id].length} rolls.`);
-      if (bet) {
-        logs.push(wonBet ? `Bet won. Payout: ${bet.amount * 2} tickets.` : `Bet lost. Stake forfeited: ${bet.amount} tickets.`);
-        if (nextTickets <= 0) {
-          logs.push("Wallet is empty. Next bets must be earned from future payouts or safety-net rules.");
-        }
-      }
-      stage = activeWars.length > 0 ? "WarSelection" : "CombatResult";
-    }
-
-    const provinces = syncProvinceOwners(state.provinces, countries);
-
+    const resolution = resolveWarTurnState(state, war, [...state.logs]);
+    const diceLog = diceOnlyLog(resolution.turn, state.countries);
+    const finalLogs = [...state.logs, diceLog, ...resolution.logs.slice(state.logs.length)];
     set({
-      countries,
-      provinces,
-      rngState,
-      activeWars,
-      selectedWarId,
-      currentBet,
-      lastCombatOutcome,
-      player,
-      warTurns,
-      completedWarResults,
-      stage,
-      logs,
+      rngState: resolution.rngState,
+      warTurns: resolution.warTurns,
+      stage: "Combat",
+      isResolvingTurn: true,
+      logs: [...state.logs, diceLog],
     });
+
+    window.setTimeout(() => {
+      set({
+        countries: resolution.countries,
+        provinces: resolution.provinces,
+        activeWars: resolution.activeWars,
+        selectedWarId: resolution.selectedWarId,
+        currentBet: resolution.currentBet,
+        lastCombatOutcome: resolution.lastCombatOutcome,
+        player: resolution.player,
+        warTurns: resolution.warTurns,
+        completedWarResults: resolution.completedWarResults,
+        countryPlacements: resolution.countryPlacements,
+        stage: resolution.stage,
+        logs: finalLogs,
+        isResolvingTurn: false,
+      });
+    }, 1000);
   },
 
   skipSelectedWar: () => {
+    if (get().isResolvingTurn) return;
     let guard = 1200;
     while (guard > 0) {
       const before = get();
       const warId = before.selectedWarId;
-      if (!warId || !before.activeWars.some(war => war.id === warId) || before.stage === "GameOver") break;
-      get().rollSelectedWarTurn();
-      const after = get();
-      if (!after.activeWars.some(war => war.id === warId)) break;
+      if (!warId || !before.activeWars.some(war => war.id === warId) || before.stage === "GameOver" || before.stage === "CampaignWon") break;
+      const war = before.activeWars.find(candidate => candidate.id === warId);
+      if (!war) break;
+      const resolution = resolveWarTurnState(before, war, [...before.logs]);
+      set({
+        countries: resolution.countries,
+        provinces: resolution.provinces,
+        rngState: resolution.rngState,
+        activeWars: resolution.activeWars,
+        selectedWarId: resolution.selectedWarId,
+        currentBet: resolution.currentBet,
+        lastCombatOutcome: resolution.lastCombatOutcome,
+        player: resolution.player,
+        warTurns: resolution.warTurns,
+        completedWarResults: resolution.completedWarResults,
+        countryPlacements: resolution.countryPlacements,
+        stage: resolution.stage,
+        logs: resolution.logs,
+        isResolvingTurn: false,
+      });
+      if (!resolution.activeWars.some(candidate => candidate.id === warId)) break;
       guard -= 1;
     }
+  },
+
+  autoResolveSelectedWarChunk: () => {
+    const start = get();
+    if (start.isResolvingTurn) return;
+    const speed = start.autoSpeed;
+    if (speed <= 1) {
+      get().rollSelectedWarTurn();
+      return;
+    }
+
+    const maxTurns = speed >= 4 ? 40 : 12;
+    let state = start;
+    let resolution: TurnResolution | null = null;
+    let turnsResolved = 0;
+    const firstWarId = state.selectedWarId;
+    const summaryLogs = [...state.logs];
+
+    while (turnsResolved < maxTurns) {
+      const war = state.activeWars.find(candidate => candidate.id === state.selectedWarId);
+      if (!war || !firstWarId || war.id !== firstWarId || state.stage === "GameOver" || state.stage === "CampaignWon") break;
+      resolution = resolveWarTurnState(state, war, summaryLogs);
+      turnsResolved += 1;
+      state = {
+        ...state,
+        countries: resolution.countries,
+        provinces: resolution.provinces,
+        rngState: resolution.rngState,
+        activeWars: resolution.activeWars,
+        selectedWarId: resolution.selectedWarId,
+        currentBet: resolution.currentBet,
+        lastCombatOutcome: resolution.lastCombatOutcome,
+        player: resolution.player,
+        warTurns: resolution.warTurns,
+        completedWarResults: resolution.completedWarResults,
+        countryPlacements: resolution.countryPlacements,
+        stage: resolution.stage,
+        logs: resolution.logs,
+      };
+      if (!state.activeWars.some(candidate => candidate.id === firstWarId)) break;
+    }
+
+    if (!resolution) return;
+    const latestWarTurns = firstWarId ? resolution.warTurns[firstWarId] ?? [] : [];
+    const capturedCount = latestWarTurns.slice(-turnsResolved).reduce((total, turn) => total + turn.capturedProvinces.length, 0);
+    const finalLogs = [
+      ...start.logs,
+      `Auto ${speed}x resolved ${turnsResolved} turn(s)${capturedCount > 0 ? ` and shifted ${capturedCount} province(s)` : ""}.`,
+      ...resolution.logs.slice(summaryLogs.length),
+    ];
+
+    set({
+      countries: resolution.countries,
+      provinces: resolution.provinces,
+      rngState: resolution.rngState,
+      activeWars: resolution.activeWars,
+      selectedWarId: resolution.selectedWarId,
+      currentBet: resolution.currentBet,
+      lastCombatOutcome: resolution.lastCombatOutcome,
+      player: resolution.player,
+      warTurns: resolution.warTurns,
+      completedWarResults: resolution.completedWarResults,
+      countryPlacements: resolution.countryPlacements,
+      stage: resolution.stage,
+      logs: finalLogs,
+      isResolvingTurn: false,
+    });
+  },
+
+  skipAllWars: () => {
+    const start = get();
+    if (start.isResolvingTurn || start.activeWars.length === 0) return;
+    set({
+      stage: "Combat",
+      selectedWarId: start.selectedWarId ?? start.activeWars[0].id,
+      isResolvingTurn: true,
+      logs: [...start.logs, `War sweep started: resolving ${start.activeWars.length} war(s).`],
+    });
+
+    let guard = 150 * Math.max(1, start.activeWars.length) + 40;
+    const step = () => {
+      const state = get();
+      if (state.activeWars.length === 0 || state.stage === "GameOver" || state.stage === "CampaignWon" || guard <= 0) {
+        if (guard <= 0) {
+          set({ logs: [...state.logs, "War sweep stopped by emergency guard. Remaining wars need manual review."], isResolvingTurn: false });
+        } else {
+          set({ isResolvingTurn: false });
+        }
+        return;
+      }
+      if (!state.selectedWarId || !state.activeWars.some(war => war.id === state.selectedWarId)) {
+        set({ selectedWarId: state.activeWars[0].id, stage: "Combat" });
+      }
+      const current = get();
+      const war = current.activeWars.find(candidate => candidate.id === current.selectedWarId);
+      if (!war) {
+        set({ isResolvingTurn: false });
+        return;
+      }
+      const resolution = resolveWarTurnState(current, war, [...current.logs]);
+      const warEnded = !resolution.activeWars.some(candidate => candidate.id === war.id);
+      set({
+        countries: resolution.countries,
+        provinces: resolution.provinces,
+        rngState: resolution.rngState,
+        activeWars: resolution.activeWars,
+        selectedWarId: resolution.selectedWarId,
+        currentBet: resolution.currentBet,
+        lastCombatOutcome: resolution.lastCombatOutcome,
+        player: resolution.player,
+        warTurns: resolution.warTurns,
+        completedWarResults: resolution.completedWarResults,
+        countryPlacements: resolution.countryPlacements,
+        stage: resolution.stage,
+        logs: resolution.logs,
+        isResolvingTurn: true,
+      });
+      guard -= 1;
+      window.setTimeout(step, warEnded ? 950 : 90);
+    };
+    window.setTimeout(step, 120);
+  },
+
+  toggleAutoPlay: () => {
+    const state = get();
+    set({ isAutoPlaying: !state.isAutoPlaying });
+  },
+
+  setAutoSpeed: (speed) => {
+    set({ autoSpeed: [1, 2, 4].includes(speed) ? speed : 1 });
   },
 
   continueAfterWar: () => {
@@ -912,9 +1515,25 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     if (aliveInScope.length <= 1) {
       const winnerId = aliveInScope[0] ?? null;
+      const countryPlacements = winnerId ? { ...state.countryPlacements, [winnerId]: 1 } : state.countryPlacements;
+      const rank = campaignFavoritePlacement(state.player.campaignFavoriteCountryId, winnerId, countryPlacements);
+      const payout = campaignPayoutForRank(state.player.campaignStake, rank);
+      const favorite = state.player.campaignFavoriteCountryId ? state.countries[state.player.campaignFavoriteCountryId] : null;
+      const nextTickets = state.player.tickets + payout;
+      saveTicketWallet(nextTickets);
       set({
-        stage: winnerId === state.player.campaignFavoriteCountryId ? "CombatResult" : "GameOver",
-        logs: [...state.logs, winnerId ? `${state.countries[winnerId].name} is the last country standing.` : "No countries remain in scope."],
+        stage: winnerId === state.player.campaignFavoriteCountryId ? "CampaignWon" : "GameOver",
+        player: {
+          ...state.player,
+          tickets: nextTickets,
+          campaignStake: 0,
+        },
+        countryPlacements,
+        logs: [
+          ...state.logs,
+          winnerId ? `${state.countries[winnerId].name} is the last country standing.` : "No countries remain in scope.",
+          campaignConclusionLog(rank, payout, favorite),
+        ],
       });
       return;
     }
@@ -930,3 +1549,4 @@ export const useGameStore = create<GameState>((set, get) => ({
     void get().initializeGame();
   },
 }));
+

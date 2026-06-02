@@ -1,4 +1,5 @@
 import type { Country } from "../models/country";
+import { controlledDevelopmentScore, religionModifier } from "../content/countryContent";
 import { governmentModifier } from "../rules/modifiers";
 
 export type WheelWeights = {
@@ -10,6 +11,7 @@ export type WheelBreakdown = {
   provincePower: number;
   government: number;
   special: number;
+  religion: number;
   event: number;
   armyCamps: number;
   capital: number;
@@ -17,7 +19,7 @@ export type WheelBreakdown = {
 };
 
 export function provincePower(provinceCount: number): number {
-  return Math.max(1, Math.min(36, Math.round(Math.sqrt(Math.max(1, provinceCount)) * 3)));
+  return Math.max(1, Math.min(180, Math.round(Math.pow(Math.max(1, provinceCount), 0.86) * 3.2)));
 }
 
 export function countryWheelBreakdown(
@@ -29,12 +31,20 @@ export function countryWheelBreakdown(
   const armyCamps = country.armyCampsCount * 10;
   const capital = hasEnemyCapital ? 20 : 0;
   const government = governmentModifier(country.government);
-  const land = Math.max(1, country.strategicPower + provincePower(provinceCount));
-  const total = Math.max(1, land + government + special + country.eventModifier + armyCamps + capital);
+  const religion = religionModifier(country.religion);
+  const originalFootprint = Math.max(1, country.initialProvinceCount);
+  const conqueredFootprint = Math.max(0, provinceCount - originalFootprint);
+  const retainedBase = country.strategicPower * Math.min(1, provinceCount / originalFootprint);
+  const conquestPower = Math.sqrt(conqueredFootprint) * 5.5;
+  const retainedStrategicPower = Math.round(Math.max(4, retainedBase + conquestPower));
+  const developmentPower = Math.round(controlledDevelopmentScore(country) * 0.45);
+  const land = Math.max(1, retainedStrategicPower + developmentPower + provincePower(provinceCount));
+  const total = Math.max(1, land + government + religion + special + country.eventModifier + armyCamps + capital);
 
   return {
     provincePower: land,
     government,
+    religion,
     special,
     event: country.eventModifier,
     armyCamps,

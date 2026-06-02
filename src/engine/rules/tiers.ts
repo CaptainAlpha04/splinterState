@@ -7,9 +7,9 @@ export type TierRules = {
 };
 
 export const defaultTierRules: TierRules = {
-  empireThreshold: 52,
-  hegemonThreshold: 92,
-  empireOverrides: [],
+  empireThreshold: 50,
+  hegemonThreshold: 9999,
+  empireOverrides: ["USA", "CHN"],
 };
 
 export function resolveTier(
@@ -18,7 +18,6 @@ export function resolveTier(
   rules: TierRules = defaultTierRules
 ): CountryTier {
   if (rules.empireOverrides.includes(countryId)) return "Empire";
-  if (strategicPower >= rules.hegemonThreshold) return "Hegemon";
   if (strategicPower >= rules.empireThreshold) return "Empire";
   return "Kingdom";
 }

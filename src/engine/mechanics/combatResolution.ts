@@ -1,4 +1,5 @@
 import type { Country } from "../models/country";
+import { controlledDevelopmentScore } from "../content/countryContent";
 import { calculateWeights } from "./initiativeWheel";
 import { bfsConquest } from "./bfsConquest";
 import { nextInt, type RngState } from "../rng/seededRng";
@@ -21,9 +22,26 @@ export type CombatTurnOutcome = {
   targetCountryId: string;
   roll: number;
   capturedProvinces: string[];
+  incineratedProvinceIds: string[];
   winnerId: string | null;
-  action: "advance" | "counter" | "camp";
+  action: "advance" | "counter" | "camp" | "nuke" | "interceptor" | "support";
+  falloutRoll?: number;
 };
+
+function rollMultiplier(country: Country) {
+  const development = controlledDevelopmentScore(country);
+  if (development >= 520) return 3;
+  if (
+    country.name.endsWith("Empire") ||
+    country.unlockedFormations.length > 0 ||
+    development >= 290 ||
+    country.baseId === "USA" ||
+    country.baseId === "CHN"
+  ) {
+    return 2;
+  }
+  return 1;
+}
 
 export function resolveCombatTurn(
   attacker: Country,
@@ -51,11 +69,14 @@ export function resolveCombatTurn(
   const activeSet = isActiveAttacker ? attackerProvinces : defenderProvinces;
   const targetSet = isActiveAttacker ? defenderProvinces : attackerProvinces;
   const roll = nextInt(rngState, -8, 8);
+  const multiplier = rollMultiplier(activeCountry);
   let capturedProvinces: string[] = [];
+  let incineratedProvinceIds: string[] = [];
   let action: CombatTurnOutcome["action"] = "advance";
+  let falloutRoll: number | undefined;
 
   if (roll > 0) {
-    const result = bfsConquest(Array.from(activeSet), targetSet, roll, adjacencyMap);
+    const result = bfsConquest(Array.from(activeSet), targetSet, roll * multiplier, adjacencyMap, targetCountry.capitalProvinceId);
     capturedProvinces = result.capturedProvinceIds;
     capturedProvinces.forEach(provinceId => {
       targetSet.delete(provinceId);
@@ -63,15 +84,34 @@ export function resolveCombatTurn(
     });
   } else if (roll < 0) {
     action = "counter";
-    const result = bfsConquest(Array.from(targetSet), activeSet, Math.abs(roll), adjacencyMap);
+    const result = bfsConquest(Array.from(targetSet), activeSet, Math.abs(roll) * multiplier, adjacencyMap, activeCountry.capitalProvinceId);
     capturedProvinces = result.capturedProvinceIds;
     capturedProvinces.forEach(provinceId => {
       activeSet.delete(provinceId);
       targetSet.add(provinceId);
     });
   } else {
-    action = "camp";
-    activeCountry.armyCampsCount += 1;
+    const specialRoll = nextInt(rngState, 1, 4);
+    if (specialRoll === 1) {
+      action = "nuke";
+      falloutRoll = nextInt(rngState, 1, 10);
+      const result = bfsConquest(Array.from(activeSet), targetSet, falloutRoll, adjacencyMap, targetCountry.capitalProvinceId);
+      capturedProvinces = result.capturedProvinceIds;
+      incineratedProvinceIds = capturedProvinces;
+      capturedProvinces.forEach(provinceId => {
+        targetSet.delete(provinceId);
+        activeSet.add(provinceId);
+      });
+    } else if (specialRoll === 2) {
+      action = "interceptor";
+      activeCountry.armyCampsCount += 1;
+    } else if (specialRoll === 3) {
+      action = "camp";
+      activeCountry.armyCampsCount += 1;
+    } else {
+      action = "support";
+      activeCountry.eventModifier += 4;
+    }
   }
 
   attacker.provinces = Array.from(attackerProvinces);
@@ -89,8 +129,10 @@ export function resolveCombatTurn(
     targetCountryId: targetCountry.id,
     roll,
     capturedProvinces,
+    incineratedProvinceIds,
     winnerId,
     action,
+    falloutRoll,
   };
 }
 

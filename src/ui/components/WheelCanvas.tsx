@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { countryWheelBreakdown } from "../../engine/mechanics/initiativeWheel";
 import { useGameStore } from "../../store/gameStore";
 
@@ -9,7 +9,6 @@ type WheelCanvasProps = {
 };
 
 export default function WheelCanvas({ size }: WheelCanvasProps) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const countries = useGameStore(state => state.countries);
   const activeWars = useGameStore(state => state.activeWars);
   const selectedWarId = useGameStore(state => state.selectedWarId);
@@ -54,77 +53,78 @@ export default function WheelCanvas({ size }: WheelCanvasProps) {
     };
   }, [activeWars, countries, selectedWarId]);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const center = size / 2;
-    const radius = center - 8;
-    ctx.clearRect(0, 0, size, size);
-
-    const gradient = ctx.createRadialGradient(center, center, 12, center, center, center);
-    gradient.addColorStop(0, "#182235");
-    gradient.addColorStop(1, "#07111c");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, size, size);
-
-    const slices = [wheelState.attackerPortion, wheelState.defenderPortion];
-    const colors = ["#496f9f", "#9f4535"];
-    let start = -Math.PI / 2;
-
-    slices.forEach((portion, index) => {
-      const angle = portion * Math.PI * 2;
-      ctx.beginPath();
-      ctx.moveTo(center, center);
-      ctx.arc(center, center, radius, start, start + angle);
-      ctx.closePath();
-      ctx.fillStyle = colors[index];
-      ctx.fill();
-      start += angle;
-    });
-
-    ctx.strokeStyle = "#c9b37a";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(center, center, radius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.fillStyle = "#070b10";
-    ctx.beginPath();
-    ctx.arc(center, center, radius * 0.34, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(220,194,128,0.62)";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    ctx.fillStyle = "#f3e7cf";
-    ctx.font = "700 13px ui-sans-serif, system-ui";
-    ctx.textAlign = "center";
-    ctx.fillText(`${Math.round(wheelState.attackerPortion * 100)}%`, center, center - 3);
-    ctx.fillStyle = "#b7a983";
-    ctx.font = "12px ui-sans-serif, system-ui";
-    ctx.fillText(`${Math.round(wheelState.defenderPortion * 100)}%`, center, center + 14);
-  }, [size, wheelState]);
-
   return (
-    <div>
-      <canvas
-        ref={canvasRef}
-        width={size}
-        height={size}
-        style={{ width: size, height: size, borderRadius: "50%" }}
-      />
-      <div style={{ marginTop: 10, color: "#cbd5e1", fontSize: 13, lineHeight: 1.45 }}>
-        <div style={{ color: "#f3e7cf", fontWeight: 800 }}>{wheelState.label}</div>
-        <div>
-          <span style={{ color: "#9bc2ea" }}>{wheelState.attackerName} power {wheelState.attackerPower}</span>
-          {" / "}
-          <span style={{ color: "#eaa094" }}>{wheelState.defenderName} power {wheelState.defenderPower}</span>
-        </div>
+    <div style={{ minHeight: Math.max(96, size * 0.56) }} className="probability-card">
+      <div className="probability-title">{wheelState.label}</div>
+      <div className="probability-row">
+        <strong>{Math.round(wheelState.attackerPortion * 100)}%</strong>
+        <span>initiative chance</span>
+        <strong>{Math.round(wheelState.defenderPortion * 100)}%</strong>
       </div>
+      <div className="probability-track" aria-label="Initiative probability split">
+        <div className="probability-attacker" style={{ width: `${wheelState.attackerPortion * 100}%` }} />
+        <div className="probability-defender" style={{ width: `${wheelState.defenderPortion * 100}%` }} />
+      </div>
+      <div className="probability-names">
+        <span>{wheelState.attackerName}<b>{wheelState.attackerPower}</b></span>
+        <span>{wheelState.defenderName}<b>{wheelState.defenderPower}</b></span>
+      </div>
+      <style jsx>{`
+        .probability-card {
+          border: 1px solid rgba(214,173,99,0.42);
+          padding: 12px;
+          background:
+            linear-gradient(135deg, rgba(214,173,99,0.11), transparent 38%),
+            linear-gradient(180deg, rgba(18,27,39,0.94), rgba(7,10,16,0.98));
+          box-shadow: inset 0 0 28px rgba(214,173,99,0.06), 0 12px 22px rgba(0,0,0,0.24);
+          clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+        }
+        .probability-title {
+          color: #fff0c8;
+          font-weight: 900;
+          margin-bottom: 10px;
+        }
+        .probability-row,
+        .probability-names {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 10px;
+          color: #9fb0c6;
+          font-size: 12px;
+        }
+        .probability-row strong {
+          color: #f8d37e;
+          font-size: 22px;
+        }
+        .probability-track {
+          display: flex;
+          height: 18px;
+          margin: 8px 0;
+          overflow: hidden;
+          border: 1px solid rgba(248,211,126,0.38);
+          background: #070b10;
+          box-shadow: inset 0 0 14px rgba(0,0,0,0.7);
+        }
+        .probability-attacker,
+        .probability-defender {
+          transition: width 360ms ease;
+        }
+        .probability-attacker {
+          background: linear-gradient(90deg, #2f6fa4, #6eb6ff);
+        }
+        .probability-defender {
+          background: linear-gradient(90deg, #c05a45, #8f2e2b);
+        }
+        .probability-names span {
+          min-width: 0;
+          color: #d6dfed;
+        }
+        .probability-names b {
+          margin-left: 6px;
+          color: #f8d37e;
+        }
+      `}</style>
     </div>
   );
 }

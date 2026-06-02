@@ -3,7 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { countryWheelBreakdown } from "../../engine/mechanics/initiativeWheel";
-import { getCountryCost, getCountrySpecialModifierTotal, getCountryTier, useGameStore } from "../../store/gameStore";
+import {
+  getCountryCost,
+  getCountryDevelopmentScore,
+  getCountryReligionModifier,
+  getCountryReligionModifierLabel,
+  getCountrySpecialModifierTotal,
+  getCountryTier,
+  useGameStore,
+} from "../../store/gameStore";
 
 type MapSvgProps = {
   svgMarkup: string;
@@ -102,13 +110,24 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapLayerRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const pendingViewportRef = useRef<Viewport | null>(null);
+  const viewportRef = useRef<Viewport>({ scale: 1, x: 0, y: 0 });
+  const frameRef = useRef<number | null>(null);
+  const overlayRef = useRef<SVGSVGElement | null>(null);
+  const viewportCommitTimerRef = useRef<number | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
+  const hoverProgressFrameRef = useRef<number | null>(null);
   const [viewport, setViewport] = useState<Viewport>({ scale: 1, x: 0, y: 0 });
   const [hoveredProvinceId, setHoveredProvinceId] = useState<string | null>(null);
+  const [pinnedProvinceId, setPinnedProvinceId] = useState<string | null>(null);
+  const [hoverProgress, setHoverProgress] = useState(0);
 
   const countries = useGameStore(state => state.countries);
   const provinces = useGameStore(state => state.provinces);
   const capitals = useGameStore(state => state.capitals);
   const activeWars = useGameStore(state => state.activeWars);
+  const warTurns = useGameStore(state => state.warTurns);
+  const selectedWarId = useGameStore(state => state.selectedWarId);
   const selectedProvinceId = useGameStore(state => state.selectedProvinceId);
   const selectedCountryId = useGameStore(state => state.selectedCountryId);
   const campaignScope = useGameStore(state => state.campaignScope);
@@ -124,10 +143,10 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     });
 
     Object.values(provinces).forEach(province => {
-      const ownerId = province.initialCountryId;
+      const ownerId = province.ownerId;
       if (!neighbors[ownerId]) neighbors[ownerId] = new Set();
       province.adjacentProvinceIds.forEach(adjacentId => {
-        const adjacentOwnerId = provinces[adjacentId]?.initialCountryId;
+        const adjacentOwnerId = provinces[adjacentId]?.ownerId;
         if (adjacentOwnerId && adjacentOwnerId !== ownerId) {
           neighbors[ownerId].add(adjacentOwnerId);
           if (!neighbors[adjacentOwnerId]) neighbors[adjacentOwnerId] = new Set();
@@ -147,7 +166,7 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           .map(neighborId => colors[neighborId])
           .filter(Boolean)
       );
-      let color = hashCountryColor(countryId);
+      let color = countries[countryId]?.mapColor ?? hashCountryColor(countryId);
       for (let offset = 0; usedByNeighbors.has(color) && offset < COUNTRY_PALETTE.length; offset += 1) {
         color = COUNTRY_PALETTE[(paletteIndex(countryId) + offset) % COUNTRY_PALETTE.length];
       }
@@ -160,15 +179,20 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
 
   const selectedProvince = selectedProvinceId ? provinces[selectedProvinceId] : null;
   const hoveredProvince = hoveredProvinceId ? provinces[hoveredProvinceId] : null;
-  const inspectedProvince = hoveredProvince ?? selectedProvince;
+  const pinnedProvince = pinnedProvinceId ? provinces[pinnedProvinceId] : null;
+  const inspectedProvince = pinnedProvince ?? hoveredProvince ?? selectedProvince;
   const inspectedCountry = inspectedProvince ? countries[inspectedProvince.ownerId] : null;
-  const hoveredCountryId = hoveredProvince?.ownerId ?? null;
+  const hoveredCountryId = (pinnedProvince ?? hoveredProvince)?.ownerId ?? null;
   const inspectedCapital = inspectedCountry
     ? capitals.find(capital => capital.countryId === inspectedCountry.id)
     : null;
   const inspectedWheel = inspectedCountry
     ? countryWheelBreakdown(inspectedCountry, inspectedCountry.provinces.length, false)
     : null;
+  const recentCapturedProvinceIds = useMemo(() => {
+    const currentWarTurns = selectedWarId ? warTurns[selectedWarId] ?? [] : [];
+    return new Set(currentWarTurns.slice(-3).flatMap(turn => turn.capturedProvinces));
+  }, [selectedWarId, warTurns]);
   const eligibleCountryIds = useMemo(
     () => (campaignScope ? new Set(campaignScope.eligibleCountryIds) : null),
     [campaignScope]
@@ -181,8 +205,13 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
       if (eligibleCountryIds && !eligibleCountryIds.has(country.id)) return;
 
       const isFocus = selectedCountryId === country.id || hoveredCountryId === country.id;
-      const shouldShowMajorLabel = viewport.scale >= 1.55 && LABEL_COUNTRIES.has(country.id);
-      if (!isFocus && !shouldShowMajorLabel) return;
+      const development = getCountryDevelopmentScore(country);
+      const provinceCount = country.provinces.length;
+      const shouldShowMajorLabel = viewport.scale >= 1.25 && LABEL_COUNTRIES.has(country.id);
+      const shouldShowLargeLabel = viewport.scale >= 1.75 && (provinceCount >= 12 || development >= 260);
+      const shouldShowRegionalLabel = viewport.scale >= 2.7 && (provinceCount >= 4 || development >= 160);
+      const shouldShowLocalLabel = viewport.scale >= 4.1 && provinceCount >= 1;
+      if (!isFocus && !shouldShowMajorLabel && !shouldShowLargeLabel && !shouldShowRegionalLabel && !shouldShowLocalLabel) return;
 
       if (!uniqueByCountry.has(country.id)) {
         uniqueByCountry.set(country.id, capital);
@@ -190,6 +219,50 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     });
     return Array.from(uniqueByCountry.values());
   }, [capitals, countries, eligibleCountryIds, hoveredCountryId, selectedCountryId, viewport.scale]);
+
+  useEffect(() => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    if (hoverProgressFrameRef.current !== null) {
+      window.cancelAnimationFrame(hoverProgressFrameRef.current);
+      hoverProgressFrameRef.current = null;
+    }
+
+    if (!hoveredProvinceId || pinnedProvinceId) {
+      setHoverProgress(pinnedProvinceId ? 100 : 0);
+      return;
+    }
+
+    const startedAt = window.performance.now();
+    const lockDelayMs = 3000;
+
+    const tick = () => {
+      const nextProgress = Math.min(100, ((window.performance.now() - startedAt) / lockDelayMs) * 100);
+      setHoverProgress(nextProgress);
+      if (nextProgress < 100) {
+        hoverProgressFrameRef.current = window.requestAnimationFrame(tick);
+      }
+    };
+
+    hoverProgressFrameRef.current = window.requestAnimationFrame(tick);
+    hoverTimerRef.current = window.setTimeout(() => {
+      setPinnedProvinceId(hoveredProvinceId);
+      setHoverProgress(100);
+    }, lockDelayMs);
+
+    return () => {
+      if (hoverTimerRef.current !== null) {
+        window.clearTimeout(hoverTimerRef.current);
+        hoverTimerRef.current = null;
+      }
+      if (hoverProgressFrameRef.current !== null) {
+        window.cancelAnimationFrame(hoverProgressFrameRef.current);
+        hoverProgressFrameRef.current = null;
+      }
+    };
+  }, [hoveredProvinceId, pinnedProvinceId]);
   const activeViewBox = useMemo(() => {
     const bounds = campaignScope?.bounds ?? { minX: -180, maxX: 180, minY: -55, maxY: 85 };
     const x = bounds.minX + 180;
@@ -198,6 +271,35 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     const height = Math.max(8, bounds.maxY - bounds.minY);
     return `${x} ${y} ${width} ${height}`;
   }, [campaignScope]);
+
+  function viewportTransform(nextViewport: Viewport) {
+    return `translate3d(${nextViewport.x}px, ${nextViewport.y}px, 0) scale(${nextViewport.scale}, ${nextViewport.scale * MAP_Y_STRETCH})`;
+  }
+
+  function applyViewportTransform(nextViewport: Viewport) {
+    const transform = viewportTransform(nextViewport);
+    if (mapLayerRef.current) {
+      mapLayerRef.current.style.transform = transform;
+    }
+    if (overlayRef.current) {
+      overlayRef.current.style.transform = transform;
+    }
+  }
+
+  function commitViewportSoon(nextViewport: Viewport, immediate = false) {
+    if (viewportCommitTimerRef.current !== null) {
+      window.clearTimeout(viewportCommitTimerRef.current);
+      viewportCommitTimerRef.current = null;
+    }
+    if (immediate) {
+      setViewport(nextViewport);
+      return;
+    }
+    viewportCommitTimerRef.current = window.setTimeout(() => {
+      viewportCommitTimerRef.current = null;
+      setViewport(viewportRef.current);
+    }, 120);
+  }
 
   useEffect(() => {
     if (mapLayerRef.current) {
@@ -211,7 +313,10 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
   useEffect(() => {
     const svg = mapLayerRef.current?.querySelector("svg");
     svg?.setAttribute("viewBox", activeViewBox);
-    setViewport({ scale: 1, x: 0, y: 0 });
+    const resetViewport = { scale: 1, x: 0, y: 0 };
+    viewportRef.current = resetViewport;
+    applyViewportTransform(resetViewport);
+    setViewport(resetViewport);
   }, [activeViewBox]);
 
   useEffect(() => {
@@ -221,22 +326,23 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     mapLayer.querySelectorAll<SVGPathElement>(".province").forEach(path => {
       const province = provinces[path.id];
       const ownerId = province?.ownerId ?? path.dataset.country ?? "";
-      const fill = province?.isIncinerated ? "#16181f" : countryColors[ownerId] ?? "#2a3445";
+      const fill = province?.isIncinerated ? "#16181f" : countryColors[ownerId] ?? countries[ownerId]?.mapColor ?? "#2a3445";
       const isAntarctica = province?.initialCountryId === "ATA" || ownerId === "ATA";
       const isOutOfScope = eligibleCountryIds ? !eligibleCountryIds.has(ownerId) : false;
       const isSelected = selectedProvinceId === path.id || selectedCountryId === ownerId;
-      const isHovered = hoveredProvinceId === path.id || hoveredCountryId === ownerId;
+      const isRecentCapture = recentCapturedProvinceIds.has(path.id);
 
       path.style.display = isAntarctica ? "none" : "";
       path.style.fill = fill;
       path.style.opacity = isOutOfScope ? "0.1" : "0.92";
-      path.style.stroke = isSelected || isHovered ? "#f8f1d0" : "rgba(3, 8, 14, 0.55)";
-      path.style.strokeWidth = selectedCountryId === ownerId ? "0.42px" : isHovered ? "0.38px" : "0.09px";
+      path.style.stroke = isSelected ? "#f8f1d0" : "rgba(3, 8, 14, 0.55)";
+      path.style.strokeWidth = selectedCountryId === ownerId ? "0.42px" : "0.09px";
       path.style.vectorEffect = "non-scaling-stroke";
       path.style.cursor = "pointer";
+      path.classList.toggle("province-captured", isRecentCapture);
       path.style.transition = "fill 180ms ease, opacity 140ms ease, stroke 120ms ease";
     });
-  }, [countryColors, eligibleCountryIds, hoveredCountryId, hoveredProvinceId, provinces, selectedCountryId, selectedProvinceId]);
+  }, [countryColors, eligibleCountryIds, provinces, recentCapturedProvinceIds, selectedCountryId, selectedProvinceId]);
 
   function clampScale(value: number) {
     return Math.min(9, Math.max(1, value));
@@ -250,14 +356,18 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     const rect = container.getBoundingClientRect();
     const pointerX = event.clientX - rect.left;
     const pointerY = event.clientY - rect.top;
-    const nextScale = clampScale(viewport.scale * (event.deltaY > 0 ? 0.88 : 1.14));
-    const ratio = nextScale / viewport.scale;
+    const currentViewport = viewportRef.current;
+    const nextScale = clampScale(currentViewport.scale * (event.deltaY > 0 ? 0.88 : 1.14));
+    const ratio = nextScale / currentViewport.scale;
 
-    setViewport({
+    const nextViewport = {
       scale: nextScale,
-      x: pointerX - (pointerX - viewport.x) * ratio,
-      y: pointerY - (pointerY - viewport.y) * ratio,
-    });
+      x: pointerX - (pointerX - currentViewport.x) * ratio,
+      y: pointerY - (pointerY - currentViewport.y) * ratio,
+    };
+    viewportRef.current = nextViewport;
+    applyViewportTransform(nextViewport);
+    commitViewportSoon(nextViewport);
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
@@ -266,8 +376,8 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      originX: viewport.x,
-      originY: viewport.y,
+      originX: viewportRef.current.x,
+      originY: viewportRef.current.y,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
@@ -276,17 +386,29 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     const drag = dragStateRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
 
-    setViewport(current => ({
-      ...current,
+    pendingViewportRef.current = {
+      scale: viewportRef.current.scale,
       x: drag.originX + event.clientX - drag.startX,
       y: drag.originY + event.clientY - drag.startY,
-    }));
+    };
+    if (frameRef.current === null) {
+      frameRef.current = window.requestAnimationFrame(() => {
+        frameRef.current = null;
+        const nextViewport = pendingViewportRef.current;
+        if (nextViewport) {
+          pendingViewportRef.current = null;
+          viewportRef.current = nextViewport;
+          applyViewportTransform(nextViewport);
+        }
+      });
+    }
   }
 
   function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
     if (dragStateRef.current?.pointerId === event.pointerId) {
       dragStateRef.current = null;
       event.currentTarget.releasePointerCapture(event.pointerId);
+      commitViewportSoon(viewportRef.current, true);
     }
   }
 
@@ -295,6 +417,8 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
     const provincePath = target?.closest?.(".province") as SVGPathElement | null;
     const provinceId = provincePath?.id ?? hoveredProvinceId;
     const province = provinceId ? provinces[provinceId] : null;
+    setPinnedProvinceId(null);
+    setHoverProgress(0);
     selectProvince(provinceId ?? null);
     selectCountry(province?.ownerId ?? null);
   }
@@ -302,14 +426,13 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
   function handleMapMove(event: React.MouseEvent<HTMLDivElement>) {
     const target = event.target as Element | null;
     const provincePath = target?.closest?.(".province") as SVGPathElement | null;
-    setHoveredProvinceId(provincePath?.id ?? null);
+    const nextHoveredProvinceId = provincePath?.id ?? null;
+    if (nextHoveredProvinceId !== hoveredProvinceId) {
+      setHoveredProvinceId(nextHoveredProvinceId);
+    }
   }
 
-  function adjustZoom(multiplier: number) {
-    setViewport(current => ({ ...current, scale: clampScale(current.scale * multiplier) }));
-  }
-
-  const transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale}, ${viewport.scale * MAP_Y_STRETCH})`;
+  const transform = viewportTransform(viewport);
 
   return (
     <div
@@ -321,10 +444,13 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
       onPointerCancel={handlePointerUp}
       onClick={handleMapClick}
       onMouseMove={handleMapMove}
-      onMouseLeave={() => setHoveredProvinceId(null)}
+      onMouseLeave={() => {
+        setHoveredProvinceId(null);
+        if (!pinnedProvinceId) setHoverProgress(0);
+      }}
       style={{
-        border: "1px solid rgba(207,167,95,0.28)",
-        borderRadius: 3,
+        border: "0",
+        borderRadius: 0,
         background:
           "radial-gradient(circle at 50% 35%, #112334 0%, #081521 52%, #04080d 100%)",
         width: "100%",
@@ -333,7 +459,7 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
         position: "relative",
         touchAction: "none",
         boxShadow:
-          "inset 0 0 0 1px rgba(255,255,255,0.035), inset 0 0 90px rgba(0,0,0,0.36), 0 18px 60px rgba(0,0,0,0.24)",
+          "inset 0 0 90px rgba(0,0,0,0.36)",
       }}
     >
       <div
@@ -345,10 +471,13 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           transform,
           transformOrigin: "center center",
           willChange: "transform",
+          backfaceVisibility: "hidden",
+          contain: "layout paint size",
         }}
       />
 
       <svg
+        ref={overlayRef}
         viewBox={activeViewBox}
         preserveAspectRatio="xMidYMid meet"
         aria-hidden="true"
@@ -361,6 +490,8 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           transform,
           transformOrigin: "center center",
           overflow: "visible",
+          willChange: "transform",
+          backfaceVisibility: "hidden",
         }}
       >
         {capitals.map(capital => {
@@ -368,8 +499,14 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           if (country?.id === "ATA") return null;
           if (eligibleCountryIds && !eligibleCountryIds.has(capital.countryId)) return null;
           if (!country?.isAlive || !country.capitalProvinceId) return null;
-          if (selectedCountryId !== country.id && hoveredCountryId !== country.id && viewport.scale < 1.55) return null;
-          if (viewport.scale >= 1.55 && !LABEL_COUNTRIES.has(country.id) && selectedCountryId !== country.id && hoveredCountryId !== country.id) return null;
+          const development = getCountryDevelopmentScore(country);
+          const shouldShowCapital =
+            selectedCountryId === country.id ||
+            hoveredCountryId === country.id ||
+            (viewport.scale >= 1.35 && LABEL_COUNTRIES.has(country.id)) ||
+            (viewport.scale >= 2.25 && development >= 180) ||
+            viewport.scale >= 4;
+          if (!shouldShowCapital) return null;
           const capitalOwnerId = provinces[country.capitalProvinceId]?.ownerId ?? country.id;
           const isOccupied = capitalOwnerId !== country.id;
 
@@ -390,26 +527,31 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           const country = countries[capital.countryId];
           if (!country) return null;
           const isFocus = selectedCountryId === country.id || hoveredCountryId === country.id;
-          const label = `${country.flag} ${country.id}`;
+          const showFullName = viewport.scale >= 2.6 && country.name.length <= 18;
+          const label = isFocus ? `${country.flag} ${country.name}` : showFullName ? country.name : country.id;
+          const fontSize = (isFocus ? 2.15 : 1.45) * Math.max(0.42, Math.min(1, 1 / Math.sqrt(viewport.scale)));
+          const labelWidth = Math.max(isFocus ? 12 : 5.5, label.length * fontSize * 1.55 + 2.4);
+          const labelHeight = (isFocus ? 4.2 : 2.95) * Math.max(0.58, Math.min(1, 1 / Math.sqrt(viewport.scale)));
+          const labelY = -labelHeight * 0.82;
 
           return (
             <g key={`${capital.countryId}-label`} transform={`translate(${capital.longitude + 180} ${90 - capital.latitude})`}>
               <rect
-                x={0.9}
-                y={isFocus ? -4.9 : -4.2}
-                width={Math.max(10, label.length * 3.2)}
-                height={isFocus ? 5.8 : 5}
-                rx={1.4}
+                x={0.7}
+                y={labelY}
+                width={labelWidth}
+                height={labelHeight}
+                rx={0.9}
                 fill={isFocus ? "rgba(239,224,190,0.96)" : "rgba(12,13,16,0.76)"}
                 stroke={countryColors[country.id] ?? "#334155"}
                 strokeWidth="0.18"
                 vectorEffect="non-scaling-stroke"
               />
               <text
-                x={2.2}
-                y={isFocus ? -0.8 : -0.9}
+                x={1.6}
+                y={labelY + labelHeight * 0.68}
                 fill={isFocus ? "#13100b" : "#f7ead0"}
-                fontSize={isFocus ? 3.1 : 2.7}
+                fontSize={fontSize}
                 fontWeight={isFocus ? 800 : 700}
                 style={{ userSelect: "none" }}
               >
@@ -456,60 +598,72 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
             </g>
           );
         })}
+        {Array.from(
+          new Map(
+            capitals
+              .map(capital => [capital.countryId, capital] as const)
+          ).values()
+        ).map(capital => {
+          const country = countries[capital.countryId];
+          if (!country?.isAlive || country.id === "ATA" || country.armyCampsCount <= 0) return null;
+          if (eligibleCountryIds && !eligibleCountryIds.has(country.id)) return null;
+          return (
+            <g
+              key={`${country.id}-${capital.name}-shield`}
+              transform={`translate(${capital.longitude + 181.2} ${90 - capital.latitude + 1.2})`}
+              className="map-token"
+            >
+              <circle r="1.65" fill="rgba(18,24,34,0.92)" stroke="#f8d37e" strokeWidth="0.18" vectorEffect="non-scaling-stroke" />
+              <path d="M -0.65 -0.85 L 0.65 -0.85 L 0.42 0.55 L 0 0.95 L -0.42 0.55 Z" fill="#f8d37e" />
+            </g>
+          );
+        })}
       </svg>
 
-      <div
-        style={{
-          position: "absolute",
-          left: 14,
-          top: 14,
-          display: "flex",
-          gap: 6,
-          background: "linear-gradient(180deg, rgba(32,27,20,0.88), rgba(6,9,14,0.86))",
-          border: "1px solid rgba(207,167,95,0.3)",
-          borderRadius: 3,
-          padding: 6,
-          backdropFilter: "blur(8px)",
-        }}
-      >
-        <button type="button" onClick={() => adjustZoom(1.22)} style={controlButtonStyle} title="Zoom in">
-          +
-        </button>
-        <button type="button" onClick={() => adjustZoom(0.82)} style={controlButtonStyle} title="Zoom out">
-          -
-        </button>
-        <button type="button" onClick={() => setViewport({ scale: 1, x: 0, y: 0 })} style={controlButtonStyle} title="Reset map">
-          Reset
-        </button>
-      </div>
-
       {inspectedProvince && inspectedCountry ? (
-        <div
-          style={{
-            position: "absolute",
-            left: 14,
-            bottom: 14,
-            maxWidth: 320,
-            background: "linear-gradient(180deg, rgba(32,27,20,0.94), rgba(6,9,14,0.94))",
-            border: "1px solid rgba(207,167,95,0.34)",
-            borderRadius: 3,
-            padding: "10px 12px",
-            backdropFilter: "blur(10px)",
-          }}
-        >
-          <div style={{ color: "#f8fafc", fontWeight: 800 }}>{inspectedCountry.flag} {inspectedCountry.name}</div>
-          <div style={{ color: "#a8b3c2", fontSize: 13 }}>
-            {inspectedProvince.name} · {getCountryTier(inspectedCountry)} · {inspectedCountry.government}
-            {inspectedCountry.capitalProvinceId === inspectedProvince.id ? " · capital" : ""}
+        <div className="country-dossier">
+          <div className="dossier-topline">
+            <span className="dossier-flag">{inspectedCountry.flag}</span>
+            <div>
+              <strong>{inspectedCountry.name}</strong>
+              <span>{inspectedProvince.name}{inspectedCountry.capitalProvinceId === inspectedProvince.id ? " / capital" : ""}</span>
+            </div>
           </div>
-          <div style={{ color: "#748397", fontSize: 12, marginTop: 4, lineHeight: 1.35 }}>
-            {inspectedCountry.provinces.length} provinces · {getCountryCost(inspectedCountry)} tickets · wheel {inspectedWheel?.total ?? 0}
-            <br />
-            land {inspectedWheel?.provincePower ?? 0} · gov {governmentModifierLabel(inspectedCountry.government)} · event {signed(inspectedCountry.eventModifier)} · special {signed(getCountrySpecialModifierTotal(inspectedCountry))}
-            {inspectedCapital ? ` · ${inspectedCapital.name}` : ""}
+          <div className="dossier-rank">
+            <span>{getCountryTier(inspectedCountry)}</span>
+            <span>{inspectedCountry.government}</span>
+            <span>{inspectedCountry.religion}</span>
           </div>
-          <div style={{ color: "#cbd5e1", fontSize: 12, marginTop: 6 }}>
-            {inspectedCountry.specialModifiers.map(modifier => `${modifier.label} ${signed(modifier.value)}`).join(" · ")}
+          <div className="dossier-lock">
+            <span>{pinnedProvinceId ? "Pinned dossier - click map to release" : "Hold hover to pin dossier"}</span>
+            <strong>{Math.round(pinnedProvinceId ? 100 : hoverProgress)}%</strong>
+            <i style={{ width: `${pinnedProvinceId ? 100 : hoverProgress}%` }} />
+          </div>
+          <div className="dossier-stats">
+            <DossierStat icon="🎡" label="Wheel" value={inspectedWheel?.total ?? 0} detail="Chance area on the initiative wheel. Higher wheel means this country is more likely to act before its enemy rolls." />
+            <DossierStat icon="🏰" label="Land" value={inspectedWheel?.provincePower ?? 0} detail="Controlled development plus current territory footprint. This is the backbone of combat momentum." />
+            <DossierStat icon="📜" label="Dev" value={getCountryDevelopmentScore(inspectedCountry)} detail="Population, area, strategic power, current footprint, and formations. This decides tier and buy-in more than raw province count." />
+            <DossierStat icon="☀️" label="Faith" value={signed(getCountryReligionModifier(inspectedCountry))} detail={`${getCountryReligionModifierLabel(inspectedCountry)} adds directly to wheel power for this country.`} />
+            <DossierStat icon="⚖️" label="Gov" value={governmentModifierLabel(inspectedCountry.government)} detail="Government ideology modifier. It adds to wheel power alongside faith, events, and special modifiers." />
+            <DossierStat icon="🌩️" label="Event" value={signed(inspectedCountry.eventModifier)} detail="Temporary modifier rolled during the Event Horizon. It resets next phase." />
+            <DossierStat icon="🎟️" label="Cost" value={getCountryCost(inspectedCountry)} detail="Favorite buy-in. Expensive powers have stronger starting position and better payout risk." />
+            <DossierStat icon="🧭" label="Provinces" value={inspectedCountry.provinces.length} detail="Current province count. It affects capture volume, but no longer defines empire rank by itself." />
+          </div>
+          <div className="dossier-mods">
+            <ModifierChip
+              label={`${getCountryReligionModifierLabel(inspectedCountry)} ${signed(getCountryReligionModifier(inspectedCountry))}`}
+              detail={`${inspectedCountry.religion} modifies initiative power by ${signed(getCountryReligionModifier(inspectedCountry))}.`}
+              icon="☀️"
+            />
+            {inspectedCountry.specialModifiers.map(modifier => (
+              <ModifierChip
+                key={modifier.label}
+                label={`${modifier.label} ${signed(modifier.value)}`}
+                detail={modifier.description}
+                icon={modifierIcon(modifier.label)}
+              />
+            ))}
+            {inspectedCapital ? <ModifierChip label={`Capital ${inspectedCapital.name}`} detail="Capital control matters for occupation pressure and campaign identity." icon="🏛️" /> : null}
           </div>
         </div>
       ) : null}
@@ -524,9 +678,202 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
         }
         .province:hover {
           filter: brightness(1.2) saturate(1.18);
+          stroke: #f8f1d0 !important;
+          stroke-width: 0.38px !important;
+        }
+        .province-captured {
+          animation: provinceCapture 1.1s ease-out both;
+          filter: brightness(1.35) saturate(1.35) drop-shadow(0 0 2px rgba(248,211,126,0.75));
+        }
+        @keyframes provinceCapture {
+          0% { opacity: 0.55; stroke-width: 1px; }
+          45% { opacity: 1; stroke-width: 0.7px; }
+          100% { opacity: 0.92; stroke-width: 0.12px; }
         }
         .war-pulse {
           animation: warPulse 1.6s ease-in-out infinite;
+        }
+        .map-token {
+          filter: drop-shadow(0 1px 1px rgba(0,0,0,0.85));
+        }
+        .country-dossier {
+          position: absolute;
+          left: 22px;
+          bottom: 22px;
+          width: min(520px, calc(100% - 44px));
+          padding: 16px;
+          color: #f8f1d0;
+          background:
+            linear-gradient(135deg, rgba(248,211,126,0.16), transparent 32%),
+            linear-gradient(180deg, rgba(35,27,16,0.95), rgba(6,9,14,0.96));
+          border: 1px solid rgba(248,211,126,0.46);
+          box-shadow: 0 16px 36px rgba(0,0,0,0.45), inset 0 0 32px rgba(248,211,126,0.08);
+          clip-path: none;
+          backdrop-filter: blur(10px);
+          overflow: visible;
+        }
+        .country-dossier::before {
+          content: "";
+          position: absolute;
+          inset: 6px;
+          border: 1px solid rgba(248,211,126,0.16);
+          pointer-events: none;
+        }
+        .dossier-topline {
+          display: grid;
+          grid-template-columns: 52px 1fr;
+          gap: 12px;
+          align-items: center;
+        }
+        .dossier-flag {
+          display: grid;
+          place-items: center;
+          width: 52px;
+          height: 52px;
+          font-size: 28px;
+          background: rgba(9,13,20,0.72);
+          border: 1px solid rgba(248,211,126,0.35);
+          box-shadow: inset 0 0 18px rgba(248,211,126,0.08);
+        }
+        .dossier-topline strong {
+          display: block;
+          color: #fff5d6;
+          font-size: 29px;
+          font-weight: 950;
+          line-height: 1.05;
+          text-shadow: 0 2px 0 rgba(0,0,0,0.8);
+        }
+        .dossier-topline span:last-child,
+        .dossier-rank {
+          color: #b9c2d0;
+          font-size: 13px;
+        }
+        .dossier-rank {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 7px;
+          margin-top: 9px;
+        }
+        .dossier-rank span {
+          padding: 5px 8px;
+          background: rgba(12,18,28,0.78);
+          border: 1px solid rgba(248,211,126,0.18);
+        }
+        .dossier-lock {
+          position: relative;
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 8px;
+          align-items: center;
+          margin-top: 10px;
+          padding: 7px 9px 9px;
+          color: #d8caa7;
+          font-size: 12px;
+          background: rgba(8,12,18,0.7);
+          border: 1px solid rgba(248,211,126,0.22);
+          overflow: hidden;
+        }
+        .dossier-lock strong {
+          color: #fff5d6;
+          font-size: 12px;
+        }
+        .dossier-lock i {
+          position: absolute;
+          left: 0;
+          bottom: 0;
+          height: 3px;
+          background: linear-gradient(90deg, #c2802e, #ffe6a3);
+          box-shadow: 0 0 14px rgba(248,211,126,0.45);
+          transition: width 90ms linear;
+        }
+        .dossier-stats {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 7px;
+          margin-top: 12px;
+        }
+        .dossier-stats span {
+          position: relative;
+          padding: 7px 8px;
+          color: #8fa0b5;
+          font-size: 11px;
+          text-transform: uppercase;
+          background: rgba(6,13,23,0.68);
+          border: 1px solid rgba(248,211,126,0.22);
+        }
+        .dossier-stat em {
+          display: block;
+          font-style: normal;
+          font-size: 14px;
+          margin-bottom: 2px;
+        }
+        .dossier-stats strong {
+          display: block;
+          margin-top: 2px;
+          color: #fff5d6;
+          font-size: 17px;
+          text-transform: none;
+        }
+        .nested-tooltip {
+          position: absolute !important;
+          left: 0;
+          bottom: calc(100% + 10px);
+          z-index: 8;
+          width: 300px;
+          max-width: min(300px, calc(100vw - 48px));
+          min-height: 84px;
+          padding: 12px 12px 12px 38px !important;
+          color: #f7e8c6 !important;
+          font-size: 12px !important;
+          line-height: 1.35;
+          text-transform: none !important;
+          background:
+            linear-gradient(180deg, rgba(45,35,22,0.98), rgba(7,11,17,0.98));
+          border: 1px solid rgba(248,211,126,0.58) !important;
+          box-shadow: 0 16px 32px rgba(0,0,0,0.55), inset 0 0 28px rgba(248,211,126,0.08);
+          opacity: 0;
+          visibility: hidden;
+          transform: translateY(4px);
+          transition: opacity 140ms ease 520ms, transform 140ms ease 520ms, visibility 0ms linear 520ms;
+          pointer-events: auto;
+        }
+        .nested-tooltip .tooltip-icon {
+          position: absolute;
+          left: 12px;
+          top: 14px;
+          width: 18px;
+          height: 18px;
+          display: grid;
+          place-items: center;
+          font-size: 15px;
+          background: rgba(248,211,126,0.12);
+          border: 1px solid rgba(248,211,126,0.28);
+        }
+        .nested-tooltip b {
+          display: block;
+          margin-bottom: 4px;
+          color: #fff5d6;
+          font-size: 13px;
+        }
+        .dossier-stat:hover .nested-tooltip,
+        .nested-tooltip:hover {
+          opacity: 1;
+          visibility: visible;
+          transform: translateY(0);
+        }
+        .dossier-mods {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 10px;
+        }
+        .dossier-mods span {
+          position: relative;
+          padding: 6px 8px;
+          color: #ffe2a3;
+          font-size: 12px;
+          background: rgba(119,74,20,0.35);
+          border: 1px solid rgba(248,211,126,0.24);
         }
         svg {
           width: 100%;
@@ -539,20 +886,36 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
   );
 }
 
-const controlButtonStyle: React.CSSProperties = {
-  minWidth: 34,
-  height: 30,
-  border: "1px solid rgba(207,167,95,0.45)",
-  borderRadius: 3,
-  background: "linear-gradient(180deg, #3b2d1c, #11151d)",
-  color: "#f6ead0",
-  cursor: "pointer",
-  fontWeight: 800,
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 0 rgba(0,0,0,0.5)",
-};
-
 function signed(value: number) {
   return value > 0 ? `+${value}` : String(value);
+}
+
+function DossierStat({ icon, label, value, detail }: { icon: string; label: string; value: string | number; detail: string }) {
+  return (
+    <span className="dossier-stat">
+      <em>{icon}</em>
+      {label}
+      <strong>{value}</strong>
+      <span className="nested-tooltip">
+        <em className="tooltip-icon">{icon}</em>
+        <b>{label}</b>
+        {detail}
+      </span>
+    </span>
+  );
+}
+
+function ModifierChip({ icon, label, detail }: { icon: string; label: string; detail: string }) {
+  return (
+    <span className="dossier-stat">
+      {label}
+      <span className="nested-tooltip">
+        <em className="tooltip-icon">{icon}</em>
+        <b>{label}</b>
+        {detail}
+      </span>
+    </span>
+  );
 }
 
 function governmentModifierLabel(government: string) {
@@ -565,3 +928,13 @@ function governmentModifierLabel(government: string) {
   };
   return signed(values[government] ?? 0);
 }
+
+function modifierIcon(label: string) {
+  if (/order|faith|zeal|catholic|sun/i.test(label)) return "☀️";
+  if (/industrial|mobilization|factory/i.test(label)) return "🏭";
+  if (/command|army|military|defense/i.test(label)) return "🛡️";
+  if (/naval|fleet|island|coast/i.test(label)) return "⚓";
+  if (/capital|bureau|state/i.test(label)) return "🏛️";
+  return "✦";
+}
+

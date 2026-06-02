@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import MapSvg from "../../ui/components/MapSvg";
 import Sidebar from "../../ui/components/Sidebar";
-import { useGameStore } from "../../store/gameStore";
+import { type CampaignScale, useGameStore } from "../../store/gameStore";
 import { loadMapAssets } from "../../lib/data/loadMapAssets";
 
 export default function GamePage() {
@@ -17,12 +17,33 @@ export default function GamePage() {
   const activeWars = useGameStore(state => state.activeWars);
   const completedWarResults = useGameStore(state => state.completedWarResults);
   const logs = useGameStore(state => state.logs);
+  const setCampaignScale = useGameStore(state => state.setCampaignScale);
+  const resetCampaign = useGameStore(state => state.resetCampaign);
+  const isResolvingTurn = useGameStore(state => state.isResolvingTurn);
+  const isAutoPlaying = useGameStore(state => state.isAutoPlaying);
+  const autoSpeed = useGameStore(state => state.autoSpeed);
+  const toggleAutoPlay = useGameStore(state => state.toggleAutoPlay);
+  const setAutoSpeed = useGameStore(state => state.setAutoSpeed);
+  const rollSelectedWarTurn = useGameStore(state => state.rollSelectedWarTurn);
+  const autoResolveSelectedWarChunk = useGameStore(state => state.autoResolveSelectedWarChunk);
   const [svgMarkup, setSvgMarkup] = useState("");
 
   useEffect(() => {
     initializeGame();
     loadMapAssets().then(assets => setSvgMarkup(assets.svgMarkup));
   }, [initializeGame]);
+
+  useGameAudio(stage, logs);
+
+  useEffect(() => {
+    if (!isAutoPlaying || stage !== "Combat" || isResolvingTurn || activeWars.length === 0) return;
+    const delay = autoSpeed <= 1 ? 1700 : autoSpeed >= 4 ? 1200 : 1400;
+    const timer = window.setTimeout(() => {
+      if (autoSpeed <= 1) rollSelectedWarTurn();
+      else autoResolveSelectedWarChunk();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [activeWars.length, autoResolveSelectedWarChunk, autoSpeed, isAutoPlaying, isResolvingTurn, rollSelectedWarTurn, stage]);
 
   const favorite = player.campaignFavoriteCountryId
     ? countries[player.campaignFavoriteCountryId]
@@ -44,6 +65,22 @@ export default function GamePage() {
       </div>
       <section style={mapDeckStyle}>
         <div style={mapFrameStyle}>
+          <div style={autoControlStyle}>
+            <button type="button" onClick={toggleAutoPlay} style={autoButtonStyle} title={isAutoPlaying ? "Pause auto rolls" : "Play auto rolls"}>
+              {isAutoPlaying ? "⏸" : "▶"}
+            </button>
+            {[1, 2, 4].map(speed => (
+              <button
+                key={speed}
+                type="button"
+                onClick={() => setAutoSpeed(speed)}
+                style={speed === autoSpeed ? activeSpeedButtonStyle : speedButtonStyle}
+                title={`${speed}x auto speed`}
+              >
+                {speed}x
+              </button>
+            ))}
+          </div>
           {isLoaded && svgMarkup ? (
             <MapSvg svgMarkup={svgMarkup} />
           ) : (
@@ -59,6 +96,16 @@ export default function GamePage() {
         </div>
       </section>
       <Sidebar />
+      {stage === "PickScope" ? <StartScene tickets={player.tickets} onPickScale={setCampaignScale} /> : null}
+      {stage === "CampaignWon" || stage === "GameOver" ? (
+        <EndScene
+          won={stage === "CampaignWon"}
+          favoriteName={favorite ? `${favorite.flag} ${favorite.name}` : "your favorite"}
+          tickets={player.tickets}
+          wars={completedWarResults.length}
+          onRestart={resetCampaign}
+        />
+      ) : null}
       <style jsx global>{`
         @keyframes splinterNoticeFade {
           0% { opacity: 0; transform: translateY(-6px); }
@@ -66,15 +113,154 @@ export default function GamePage() {
           72% { opacity: 1; transform: translateY(0); }
           100% { opacity: 0; transform: translateY(-4px); }
         }
+        @keyframes commandGlow {
+          0%, 100% { filter: drop-shadow(0 0 0 rgba(248,211,126,0)); }
+          50% { filter: drop-shadow(0 0 14px rgba(248,211,126,0.42)); }
+        }
+        @keyframes medalDrop {
+          0% { opacity: 0; transform: translateY(-12px) scale(0.82); }
+          100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
       `}</style>
     </main>
   );
 }
 
+function useGameAudio(stage: string, logs: string[]) {
+  const unlockedRef = useRef(false);
+  const musicRef = useRef<HTMLAudioElement | null>(null);
+  const previousStageRef = useRef(stage);
+  const previousLogCountRef = useRef(logs.length);
+
+  const play = (file: string, volume = 0.55) => {
+    if (!unlockedRef.current) return;
+    const audio = new Audio(`/sounds/${file}.mp3`);
+    audio.volume = volume;
+    void audio.play().catch(() => undefined);
+  };
+
+  useEffect(() => {
+    const unlock = () => {
+      unlockedRef.current = true;
+      if (!musicRef.current) {
+        const music = new Audio("/sounds/music_campaign_loop.mp3");
+        music.loop = true;
+        music.volume = 0.22;
+        musicRef.current = music;
+      }
+      if (stage !== "PickScope") {
+        void musicRef.current.play().catch(() => undefined);
+      }
+      window.removeEventListener("pointerdown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock, { once: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, [stage]);
+
+  useEffect(() => {
+    if (!unlockedRef.current || !musicRef.current) return;
+    if (stage === "PickScope" || stage === "CampaignWon" || stage === "GameOver") {
+      musicRef.current.pause();
+    } else {
+      void musicRef.current.play().catch(() => undefined);
+    }
+
+    if (previousStageRef.current !== stage) {
+      if (stage === "CampaignWon") play("victory", 0.75);
+      if (stage === "GameOver") play("defeat", 0.72);
+      if (stage === "Betting" || stage === "WarSelection") play("ui_card_select", 0.45);
+      previousStageRef.current = stage;
+    }
+  }, [stage]);
+
+  useEffect(() => {
+    if (logs.length <= previousLogCountRef.current) return;
+    const latest = logs[logs.length - 1] ?? "";
+    previousLogCountRef.current = logs.length;
+    if (/nuke/i.test(latest)) play("nuke_launch", 0.72);
+    else if (/captured|counter operations/i.test(latest)) play("province_capture", 0.58);
+    else if (/rolled|dice/i.test(latest)) play("dice_roll", 0.58);
+    else if (/broke away|Civil war/i.test(latest)) play("rebellion", 0.62);
+    else if (/War erupted|placed|selected/i.test(latest)) play("ui_card_select", 0.45);
+  }, [logs]);
+}
+
+function StartScene({ tickets, onPickScale }: { tickets: number; onPickScale: (scale: CampaignScale) => void }) {
+  const scales: Array<{ scale: CampaignScale; title: string; icon: string; copy: string }> = [
+    { scale: "World War", title: "World War", icon: "🌍", copy: "Every surviving country enters the long campaign." },
+    { scale: "Continent War", title: "Continent War", icon: "🛡️", copy: "Anchor on one continent and lock the camera there." },
+    { scale: "Regional War", title: "Regional War", icon: "🗡️", copy: "A shorter knife fight inside one theater." },
+  ];
+
+  return (
+    <div style={sceneOverlayStyle}>
+      <section style={scenePanelStyle}>
+        <div style={warRoomBackdropStyle}>
+          <span>⚔️</span><span>🎲</span><span>☢️</span><span>👑</span>
+        </div>
+        <div style={sceneTitleBlockStyle}>
+          <span>Splinter States</span>
+          <h1>Choose Your War</h1>
+          <p style={sceneLeadStyle}>Banked tickets carry between campaigns. Pick the scale, then buy an anchor country on the map.</p>
+        </div>
+        <div style={walletRibbonStyle}>
+          <span>🎟️ War Treasury</span>
+          <strong>{tickets}</strong>
+        </div>
+        <div style={scaleGridStyle}>
+          {scales.map(item => (
+            <button key={item.scale} type="button" onClick={() => onPickScale(item.scale)} style={scaleCardStyle}>
+              <span style={scaleIconStyle}>{item.icon}</span>
+              <strong>{item.title}</strong>
+              <span>{item.copy}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function EndScene({ won, favoriteName, tickets, wars, onRestart }: { won: boolean; favoriteName: string; tickets: number; wars: number; onRestart: () => void }) {
+  return (
+    <div style={sceneOverlayStyle}>
+      <section style={{ ...scenePanelStyle, borderColor: won ? "rgba(120, 220, 150, 0.6)" : "rgba(220, 90, 70, 0.62)" }}>
+        {won ? <div style={victoryBurstStyle} /> : null}
+        <div style={endBannerStyle}>
+          {won ? "🏆" : "💀"}
+        </div>
+        <div style={sceneTitleBlockStyle}>
+          <span>{won ? "Campaign Victory" : "Campaign Lost"}</span>
+          <h1>{won ? "You Won" : "Your Favorite Fell"}</h1>
+          <p style={sceneLeadStyle}>{won ? "The realm stands alone. The treasury has been updated for the next campaign." : "The campaign ledger is closed. Remaining tickets stay in your treasury."}</p>
+        </div>
+        <div style={scoreCardStyle}>
+          <strong>{favoriteName}</strong>
+          <div style={scoreGridStyle}>
+            <span><small>Final Wallet</small><b>{tickets}</b></span>
+            <span><small>Wars Resolved</small><b>{wars}</b></span>
+            <span><small>Campaign Result</small><b>{won ? "Rank 1" : "Eliminated"}</b></span>
+          </div>
+        </div>
+        <button type="button" onClick={onRestart} style={restartButtonStyle}>
+          New Campaign
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function HudMetric({ label, value }: { label: string; value: string }) {
+  const icons: Record<string, string> = {
+    Stage: "⏳",
+    Tickets: "🎟️",
+    Scope: "🗺️",
+    Favorite: "👑",
+    Wars: "⚔️",
+  };
   return (
     <div style={hudMetricStyle}>
-      <span>{label}</span>
+      <span>{icons[label] ?? "◆"} {label}</span>
       <strong>{value}</strong>
     </div>
   );
@@ -89,6 +275,7 @@ function stageLabel(stage: string) {
     Betting: "Wager",
     Combat: "Combat",
     CombatResult: "Aftermath",
+    CampaignWon: "Victory",
     GameOver: "Game Over",
   };
   return labels[stage] ?? stage;
@@ -96,11 +283,11 @@ function stageLabel(stage: string) {
 
 const shellStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) 388px",
-  gridTemplateRows: "54px minmax(0, 1fr)",
+  gridTemplateColumns: "minmax(0, 1fr) 430px",
+  gridTemplateRows: "64px minmax(0, 1fr)",
   height: "100vh",
   background:
-    "linear-gradient(180deg, #16120e 0%, #0c1118 38%, #06080d 100%)",
+    "radial-gradient(circle at 50% -20%, rgba(173,126,49,0.22), transparent 34%), linear-gradient(180deg, #19120b 0%, #0b1119 42%, #03060a 100%)",
   color: "#e8dfc8",
   overflow: "hidden",
 };
@@ -110,10 +297,10 @@ const statusBarStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "240px repeat(5, minmax(120px, 1fr))",
   alignItems: "stretch",
-  borderBottom: "1px solid rgba(193, 150, 84, 0.38)",
+  borderBottom: "2px solid rgba(210, 165, 82, 0.55)",
   background:
-    "linear-gradient(180deg, rgba(50,42,32,0.98), rgba(18,18,20,0.98))",
-  boxShadow: "0 8px 22px rgba(0,0,0,0.34)",
+    "linear-gradient(180deg, rgba(72,51,28,0.98), rgba(24,21,18,0.98)), repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 12px)",
+  boxShadow: "0 10px 30px rgba(0,0,0,0.48), inset 0 -1px 0 rgba(255,234,170,0.18)",
 };
 
 const brandPlateStyle: React.CSSProperties = {
@@ -123,6 +310,7 @@ const brandPlateStyle: React.CSSProperties = {
   alignContent: "center",
   color: "#f6ead0",
   textShadow: "0 1px 0 #000",
+  background: "radial-gradient(circle at 10% 20%, rgba(255,226,147,0.2), transparent 38%)",
 };
 
 const brandKickerStyle: React.CSSProperties = {
@@ -135,18 +323,18 @@ const brandKickerStyle: React.CSSProperties = {
 
 const hudMetricStyle: React.CSSProperties = {
   minWidth: 0,
-  padding: "8px 12px",
+  padding: "9px 12px",
   borderRight: "1px solid rgba(193, 150, 84, 0.22)",
   display: "grid",
   alignContent: "center",
   gap: 1,
   background:
-    "linear-gradient(90deg, rgba(255,255,255,0.035), rgba(255,255,255,0))",
+    "linear-gradient(90deg, rgba(255,226,147,0.075), rgba(255,255,255,0))",
 };
 
 const mapDeckStyle: React.CSSProperties = {
   minHeight: 0,
-  padding: 12,
+  padding: 0,
   overflow: "hidden",
   display: "flex",
   alignItems: "center",
@@ -154,17 +342,16 @@ const mapDeckStyle: React.CSSProperties = {
 };
 
 const mapFrameStyle: React.CSSProperties = {
-  width: "min(100%, calc((100vh - 78px) * 1.333))",
+  width: "100%",
   maxWidth: "100%",
-  height: "auto",
+  height: "100%",
   maxHeight: "100%",
-  aspectRatio: "4 / 3",
   position: "relative",
-  border: "1px solid rgba(193, 150, 84, 0.42)",
-  borderRadius: 4,
+  border: "0",
+  borderRadius: 0,
   background: "#04080d",
   boxShadow:
-    "inset 0 0 0 1px rgba(255,255,255,0.04), inset 0 0 70px rgba(0,0,0,0.42), 0 18px 44px rgba(0,0,0,0.34)",
+    "inset 0 0 70px rgba(0,0,0,0.42)",
 };
 
 const loadingStyle: React.CSSProperties = {
@@ -185,6 +372,43 @@ const notificationStackStyle: React.CSSProperties = {
   pointerEvents: "none",
 };
 
+const autoControlStyle: React.CSSProperties = {
+  position: "absolute",
+  left: 14,
+  top: 14,
+  zIndex: 8,
+  display: "flex",
+  gap: 6,
+  padding: 6,
+  background: "linear-gradient(180deg, rgba(35,25,15,0.92), rgba(7,10,15,0.9))",
+  border: "1px solid rgba(207,167,95,0.42)",
+  boxShadow: "0 10px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.08)",
+};
+
+const autoButtonStyle: React.CSSProperties = {
+  minWidth: 38,
+  height: 34,
+  border: "1px solid rgba(248,211,126,0.44)",
+  background: "linear-gradient(180deg, #6f4a1d, #1b1208)",
+  color: "#fff1c9",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const speedButtonStyle: React.CSSProperties = {
+  ...autoButtonStyle,
+  minWidth: 42,
+  background: "linear-gradient(180deg, #263142, #0f141d)",
+  color: "#c9d2df",
+};
+
+const activeSpeedButtonStyle: React.CSSProperties = {
+  ...speedButtonStyle,
+  border: "1px solid #f8d37e",
+  background: "linear-gradient(180deg, #9b6a26, #3c240d)",
+  color: "#fff1c9",
+};
+
 const noticeStyle: React.CSSProperties = {
   border: "1px solid rgba(207, 167, 95, 0.42)",
   borderRadius: 3,
@@ -196,4 +420,159 @@ const noticeStyle: React.CSSProperties = {
   lineHeight: 1.35,
   boxShadow: "0 8px 20px rgba(0,0,0,0.34)",
   animation: "splinterNoticeFade 7s ease forwards",
+};
+
+const sceneOverlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 20,
+  display: "grid",
+  placeItems: "center",
+  background:
+    "radial-gradient(circle at 50% 32%, rgba(106,71,28,0.56), rgba(3,6,10,0.9) 62%), repeating-linear-gradient(45deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 9px)",
+  backdropFilter: "blur(3px)",
+};
+
+const scenePanelStyle: React.CSSProperties = {
+  position: "relative",
+  width: "min(760px, calc(100vw - 48px))",
+  border: "2px solid rgba(228, 181, 92, 0.68)",
+  borderRadius: 0,
+  padding: 24,
+  background:
+    "linear-gradient(135deg, rgba(98,67,29,0.22), transparent 34%), linear-gradient(180deg, rgba(48,37,24,0.97), rgba(11,14,19,0.99))",
+  boxShadow: "0 34px 90px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.14), inset 0 0 50px rgba(228,181,92,0.08)",
+  clipPath: "polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 22px 100%, 0 calc(100% - 22px))",
+  overflow: "hidden",
+};
+
+const sceneTitleBlockStyle: React.CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  display: "grid",
+  gap: 4,
+  marginBottom: 20,
+  color: "#f5e6c8",
+  textShadow: "0 2px 0 rgba(0,0,0,0.6)",
+};
+
+const sceneLeadStyle: React.CSSProperties = {
+  maxWidth: 560,
+  margin: "4px 0 0",
+  color: "#cbbf9d",
+  fontSize: 14,
+  lineHeight: 1.45,
+};
+
+const warRoomBackdropStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  display: "flex",
+  justifyContent: "space-around",
+  alignItems: "center",
+  color: "rgba(255,226,147,0.08)",
+  fontSize: 86,
+  transform: "rotate(-8deg) scale(1.08)",
+  pointerEvents: "none",
+};
+
+const walletRibbonStyle: React.CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  marginBottom: 14,
+  padding: "10px 12px",
+  color: "#ffe9b7",
+  background: "linear-gradient(90deg, rgba(106,63,20,0.86), rgba(14,20,30,0.86))",
+  border: "1px solid rgba(248,211,126,0.38)",
+  boxShadow: "inset 0 0 24px rgba(248,211,126,0.08)",
+};
+
+const scaleGridStyle: React.CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const scaleCardStyle: React.CSSProperties = {
+  minHeight: 150,
+  border: "1px solid rgba(230,190,120,0.5)",
+  borderRadius: 0,
+  padding: 14,
+  display: "grid",
+  alignContent: "end",
+  gap: 8,
+  color: "#f9edce",
+  textAlign: "left",
+  cursor: "pointer",
+  background:
+    "linear-gradient(180deg, rgba(84,63,35,0.36), rgba(8,12,18,0.94)), radial-gradient(circle at 50% 20%, rgba(216,153,66,0.3), transparent 45%)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.12), 0 8px 0 rgba(0,0,0,0.32)",
+  animation: "commandGlow 3.2s ease-in-out infinite",
+};
+
+const scaleIconStyle: React.CSSProperties = {
+  fontSize: 34,
+  filter: "drop-shadow(0 3px 0 rgba(0,0,0,0.55))",
+};
+
+const endStatsStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+  marginBottom: 18,
+  color: "#d6c8a8",
+};
+
+const scoreCardStyle: React.CSSProperties = {
+  ...endStatsStyle,
+  position: "relative",
+  zIndex: 1,
+  padding: 16,
+  border: "1px solid rgba(230,190,120,0.42)",
+  background: "linear-gradient(180deg, rgba(14,20,30,0.82), rgba(5,8,12,0.92))",
+  boxShadow: "inset 0 0 34px rgba(230,190,120,0.08)",
+};
+
+const endBannerStyle: React.CSSProperties = {
+  position: "absolute",
+  right: 28,
+  top: 24,
+  zIndex: 2,
+  width: 74,
+  height: 74,
+  display: "grid",
+  placeItems: "center",
+  fontSize: 42,
+  background: "radial-gradient(circle at 50% 30%, rgba(255,238,180,0.3), rgba(70,42,14,0.72))",
+  border: "1px solid rgba(248,211,126,0.45)",
+  boxShadow: "0 14px 32px rgba(0,0,0,0.45), inset 0 0 22px rgba(248,211,126,0.12)",
+  animation: "medalDrop 420ms ease-out both",
+};
+
+const scoreGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 10,
+};
+
+const victoryBurstStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: -2,
+  pointerEvents: "none",
+  background:
+    "radial-gradient(circle at 20% 20%, rgba(255,226,147,0.28), transparent 18%), radial-gradient(circle at 80% 28%, rgba(120,220,150,0.22), transparent 20%), radial-gradient(circle at 52% 0%, rgba(255,255,255,0.22), transparent 16%)",
+};
+
+const restartButtonStyle: React.CSSProperties = {
+  border: "1px solid #d6ad63",
+  borderRadius: 5,
+  padding: "12px 18px",
+  background: "linear-gradient(180deg, #9d6f30, #583912)",
+  color: "#fff1cf",
+  fontWeight: 900,
+  cursor: "pointer",
 };

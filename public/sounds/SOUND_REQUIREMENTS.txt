@@ -1,0 +1,64 @@
+Splinter States sound requirements
+
+Current implementation includes synthesized placeholder tones after the first player click.
+Replace or layer these with real assets when available.
+
+1. music_campaign_loop
+   File: public/sounds/music_campaign_loop.mp3
+   Length: 60-120 seconds, seamless loop
+   Use: Low-volume map campaign bed after campaign scale is chosen.
+   Style: Grand strategy ambience, restrained drums, low strings, no vocals.
+
+2. ui_card_select
+   File: public/sounds/ui_card_select.mp3
+   Length: 0.10-0.20 seconds
+   Use: Selecting country cards, campaign scale cards, and war cards.
+   Style: Wooden token click with soft metallic edge.
+
+3. wheel_spin
+   File: public/sounds/wheel_spin.mp3
+   Length: 0.70-1.20 seconds
+   Use: When the initiative wheel spins before a dice roll.
+   Style: Mechanical wheel ratchet, rising tension, clean stop.
+
+4. dice_roll
+   File: public/sounds/dice_roll.mp3
+   Length: 0.45-0.80 seconds
+   Use: Manual Roll Dice action.
+   Style: Physical dice on wood or stone, not casino-like.
+
+5. province_capture
+   File: public/sounds/province_capture.mp3
+   Length: 0.20-0.40 seconds
+   Use: Positive or negative rolls that transfer provinces.
+   Style: Banner snap plus map stamp.
+
+6. nuke_launch
+   File: public/sounds/nuke_launch.mp3
+   Length: 1.20-2.00 seconds
+   Use: Zero-roll tactical nuke result.
+   Style: Deep launch thump, air pressure swell, no harsh clipping.
+
+7. interceptor
+   File: public/sounds/interceptor.mp3
+   Length: 0.45-0.80 seconds
+   Use: Zero-roll interceptor shield result.
+   Style: Shield charge or defensive chime.
+
+8. rebellion
+   File: public/sounds/rebellion.mp3
+   Length: 0.80-1.40 seconds
+   Use: Event Horizon rebel breakaway.
+   Style: Crowd surge, torn banner, distant alarm.
+
+9. victory
+   File: public/sounds/victory.mp3
+   Length: 2.50-5.00 seconds
+   Use: CampaignWon end screen.
+   Style: Short triumphant fanfare.
+
+10. defeat
+    File: public/sounds/defeat.mp3
+    Length: 2.00-4.00 seconds
+    Use: GameOver end screen.
+    Style: Somber low brass/string cadence.

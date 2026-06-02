@@ -7,6 +7,16 @@ export function createRng(seed: number): RngState {
   return { seed: normalized === 0 ? 1 : normalized };
 }
 
+export function createEntropySeed(): number {
+  const cryptoValue = typeof globalThis.crypto !== "undefined"
+    ? globalThis.crypto.getRandomValues(new Uint32Array(1))[0]
+    : 0;
+  const performanceValue = typeof globalThis.performance !== "undefined"
+    ? Math.floor(globalThis.performance.now() * 1000)
+    : 0;
+  return (Date.now() ^ cryptoValue ^ performanceValue) >>> 0;
+}
+
 export function nextInt(state: RngState, min: number, max: number): number {
   if (max < min) {
     throw new Error(`Invalid RNG range: ${min}..${max}`);

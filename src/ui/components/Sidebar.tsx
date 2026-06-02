@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useMemo, useState } from "react";
 import type React from "react";
@@ -6,7 +6,8 @@ import type { Country } from "../../engine/models/country";
 import { countryWheelBreakdown } from "../../engine/mechanics/initiativeWheel";
 import {
   getCountryCost,
-  getCountrySpecialModifierTotal,
+  getCountryDevelopmentScore,
+  getCountryReligionModifier,
   getCountryTier,
   type CampaignScale,
   useGameStore,
@@ -32,6 +33,7 @@ export default function Sidebar() {
   const lastCombatOutcome = useGameStore(state => state.lastCombatOutcome);
   const warTurns = useGameStore(state => state.warTurns);
   const completedWarResults = useGameStore(state => state.completedWarResults);
+  const isResolvingTurn = useGameStore(state => state.isResolvingTurn);
   const setCampaignScale = useGameStore(state => state.setCampaignScale);
   const chooseFavorite = useGameStore(state => state.chooseFavorite);
   const rollCampaignEvents = useGameStore(state => state.rollCampaignEvents);
@@ -39,6 +41,7 @@ export default function Sidebar() {
   const placeWarBet = useGameStore(state => state.placeWarBet);
   const rollSelectedWarTurn = useGameStore(state => state.rollSelectedWarTurn);
   const skipSelectedWar = useGameStore(state => state.skipSelectedWar);
+  const skipAllWars = useGameStore(state => state.skipAllWars);
   const continueAfterWar = useGameStore(state => state.continueAfterWar);
   const resetCampaign = useGameStore(state => state.resetCampaign);
 
@@ -67,6 +70,7 @@ export default function Sidebar() {
       case "Betting": return "Wager";
       case "Combat": return "Live War";
       case "CombatResult": return "Aftermath";
+      case "CampaignWon": return "Victory";
       case "GameOver": return "Campaign Over";
       default: return "Campaign";
     }
@@ -144,6 +148,9 @@ export default function Sidebar() {
                   Completed this phase: {completedWarResults.length}
                 </div>
               ) : null}
+              <button type="button" onClick={skipAllWars} style={dangerButtonStyle}>
+                Skip All Wars
+              </button>
             </div>
           )}
         </Panel>
@@ -153,18 +160,16 @@ export default function Sidebar() {
         <Panel>
             <div style={{ display: "grid", gap: 10 }}>
               <WheelCanvas size={160} />
+              <DiceFace value={latestTurn?.roll ?? null} large />
               {selectedWarCountries.map(country => (
                 <button
                   key={country.id}
                   type="button"
                   disabled={stage === "Combat"}
                   onClick={() => placeWarBet(country.id, Math.min(betAmount, player.tickets))}
-                  style={currentBet?.predictedWinnerId === country.id ? selectedButtonStyle : stage === "Combat" ? disabledButtonStyle : warButtonStyle}
+                  style={currentBet?.predictedWinnerId === country.id ? selectedCardButtonStyle : stage === "Combat" ? disabledCardButtonStyle : cardButtonStyle}
                 >
-                  {country.flag} {country.name}
-                  <span>
-                    {getCountryTier(country)} · power {countryWheelBreakdown(country, country.provinces.length, false).total} · mods {signed(getCountrySpecialModifierTotal(country) + country.eventModifier)}
-                  </span>
+                  <CountryCard country={country} selected={currentBet?.predictedWinnerId === country.id} />
                 </button>
               ))}
               {stage === "Betting" ? (
@@ -189,15 +194,21 @@ export default function Sidebar() {
                     <span>{selectedWarTurns.length}</span>
                   </div>
                   <div style={dicePanelStyle}>
-                    <span>Latest Dice</span>
-                    <strong>{latestTurn ? signed(latestTurn.roll) : "-"}</strong>
-                    <small>{latestTurn ? `${countries[latestTurn.activeCountryId]?.name ?? latestTurn.activeCountryId} acted` : "Awaiting player roll"}</small>
+                    <div>
+                      <span>Latest Dice</span>
+                      <strong>{latestTurn ? signed(latestTurn.roll) : "-"}</strong>
+                      <small>{latestTurn ? `${countries[latestTurn.activeCountryId]?.name ?? latestTurn.activeCountryId} acted / ${latestTurn.action}` : "Awaiting player roll"}</small>
+                    </div>
                   </div>
-                  <button type="button" onClick={rollSelectedWarTurn} style={primaryButtonStyle}>
-                    Roll Dice
+                  {latestTurn?.roll === 0 ? <SpecialOutcomeStrip active={latestTurn.action} /> : null}
+                  <button type="button" disabled={isResolvingTurn} onClick={rollSelectedWarTurn} style={isResolvingTurn ? disabledButtonStyle : primaryButtonStyle}>
+                    {isResolvingTurn ? "Resolving..." : "Roll Dice"}
                   </button>
-                  <button type="button" onClick={skipSelectedWar} style={dangerButtonStyle}>
+                  <button type="button" disabled={isResolvingTurn} onClick={skipSelectedWar} style={isResolvingTurn ? disabledButtonStyle : dangerButtonStyle}>
                     Skip War
+                  </button>
+                  <button type="button" disabled={isResolvingTurn} onClick={skipAllWars} style={isResolvingTurn ? disabledButtonStyle : dangerButtonStyle}>
+                    Skip All Wars
                   </button>
                 </>
               )}
@@ -219,14 +230,75 @@ export default function Sidebar() {
         </Panel>
       ) : null}
 
-      {stage !== "PickScope" && stage !== "Betting" && stage !== "Combat" ? (
+      {stage === "CampaignWon" ? (
         <Panel>
-          <CountryIntel country={selectedCountry} provinceName={selectedProvince?.name} compact />
+          <p style={copyStyle}>Your campaign favorite is the last country standing.</p>
+          <button type="button" onClick={resetCampaign} style={primaryButtonStyle}>New Campaign</button>
         </Panel>
       ) : null}
 
       {stage === "WarSelection" || stage === "CombatResult" || stage === "GameOver" ? <RollLog /> : null}
     </aside>
+  );
+}
+
+function SpecialOutcomeStrip({ active }: { active: string }) {
+  const outcomes = [
+    { id: "nuke", icon: "☢️", label: "Nuke" },
+    { id: "interceptor", icon: "🛡️", label: "Interceptor" },
+    { id: "camp", icon: "⛺", label: "Camp" },
+    { id: "support", icon: "📣", label: "Support" },
+  ];
+  return (
+    <div style={specialStripStyle}>
+      <strong>Zero Special</strong>
+      <div style={specialGridStyle}>
+        {outcomes.map(outcome => (
+          <span key={outcome.id} style={active === outcome.id ? activeSpecialStyle : specialCellStyle}>
+            <b>{outcome.icon}</b>
+            {outcome.label}
+            <small>25%</small>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CountryCard({ country, selected }: { country: Country; selected: boolean }) {
+  const wheel = countryWheelBreakdown(country, country.provinces.length, false);
+  return (
+    <div style={countryCardStyle}>
+      <div style={countryArtStyle}>
+        <span style={{ fontSize: 32 }}>{country.flag}</span>
+        <strong>{country.id}</strong>
+      </div>
+      <div style={{ display: "grid", gap: 4 }}>
+        <strong style={{ color: selected ? "#fff4d2" : "#f3e7cf" }}>{country.name}</strong>
+        <span>{getCountryTier(country)} / {country.government} / {country.religion}</span>
+        <span>Power {wheel.total} / Dev {getCountryDevelopmentScore(country)} / Faith {signed(getCountryReligionModifier(country))}</span>
+      </div>
+    </div>
+  );
+}
+
+function DiceFace({ value, large = false }: { value: number | null; large?: boolean }) {
+  const display = value === null ? "?" : value > 0 ? `+${value}` : String(value);
+  return (
+    <div key={display} style={large ? largeDiceWrapStyle : diceFaceStyle} className="dice-pop">
+      <span>{display}</span>
+      <style jsx>{`
+        .dice-pop {
+          animation: dicePop 520ms cubic-bezier(0.18, 0.9, 0.25, 1.25);
+        }
+        @keyframes dicePop {
+          0% { transform: rotateX(65deg) rotateZ(-20deg) scale(0.72); }
+          45% { transform: rotateX(0deg) rotateZ(14deg) scale(1.14); }
+          72% { transform: rotateX(0deg) rotateZ(-6deg) scale(1.04); }
+          100% { transform: rotate(0deg) scale(1); }
+        }
+      `}</style>
+    </div>
   );
 }
 
@@ -247,23 +319,10 @@ function CountryIntel({ country, provinceName, compact = false }: { country: Cou
         <span>Tier</span><strong>{getCountryTier(country)}</strong>
         <span>Buy-in</span><strong>{getCountryCost(country)}</strong>
         <span>Government</span><strong>{country.government}</strong>
+        <span>Religion</span><strong>{country.religion}</strong>
+        <span>Development</span><strong>{getCountryDevelopmentScore(country)}</strong>
         <span>Wheel power</span><strong>{wheel.total}</strong>
-        <span>Land power</span><strong>{wheel.provincePower}</strong>
-        <span>Modifiers</span><strong>{signed(wheel.government + wheel.special + wheel.event + wheel.armyCamps)}</strong>
-        <span>Event modifier</span><strong>{signed(country.eventModifier)}</strong>
-        <span>Army camps</span><strong>{country.armyCampsCount}</strong>
-        <span>Provinces</span><strong>{country.provinces.length}</strong>
       </div>
-      {!compact ? (
-        <div style={{ display: "grid", gap: 6 }}>
-          {country.specialModifiers.map(modifier => (
-            <div key={modifier.label} style={modifierStyle}>
-              <strong>{modifier.label} {signed(modifier.value)}</strong>
-              <span>{modifier.description}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -277,23 +336,26 @@ function signed(value: number) {
 }
 
 const sidebarStyle: React.CSSProperties = {
-  padding: 16,
-  borderLeft: "1px solid rgba(184,139,74,0.38)",
-  background: "linear-gradient(180deg, rgba(22,18,15,0.98), rgba(8,11,17,0.98))",
+  padding: 18,
+  borderLeft: "2px solid rgba(211,166,88,0.55)",
+  background:
+    "radial-gradient(circle at 80% 0%, rgba(178,119,39,0.2), transparent 28%), linear-gradient(180deg, rgba(28,20,14,0.99), rgba(6,9,15,0.99))",
   display: "flex",
   flexDirection: "column",
   gap: 12,
   height: "100%",
   overflowY: "auto",
-  boxShadow: "inset 10px 0 28px rgba(0,0,0,0.28)",
+  boxShadow: "inset 12px 0 36px rgba(0,0,0,0.42), inset 1px 0 0 rgba(255,226,147,0.14)",
 };
 
 const panelStyle: React.CSSProperties = {
-  border: "1px solid rgba(184,139,74,0.32)",
-  borderRadius: 4,
-  padding: 12,
-  background: "linear-gradient(180deg, rgba(26,31,38,0.92), rgba(10,14,21,0.94))",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 24px rgba(0,0,0,0.22)",
+  border: "1px solid rgba(211,166,88,0.42)",
+  borderRadius: 0,
+  padding: 14,
+  background:
+    "linear-gradient(135deg, rgba(231,188,96,0.08), transparent 34%), linear-gradient(180deg, rgba(28,34,43,0.94), rgba(7,10,16,0.96))",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.07), inset 0 0 28px rgba(211,166,88,0.05), 0 12px 28px rgba(0,0,0,0.28)",
+  clipPath: "polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px))",
 };
 
 const copyStyle: React.CSSProperties = {
@@ -311,14 +373,14 @@ const warningStyle: React.CSSProperties = {
 
 const primaryButtonStyle: React.CSSProperties = {
   border: "1px solid #c49a54",
-  borderRadius: 3,
-  background: "linear-gradient(180deg, #8f6830, #4d3518)",
+  borderRadius: 0,
+  background: "linear-gradient(180deg, #a97b35, #4d3518)",
   color: "#fff3d0",
   padding: "10px 12px",
   cursor: "pointer",
   fontWeight: 800,
   textShadow: "0 1px 0 #1c1208",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18), 0 2px 0 #26190b",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18), 0 3px 0 #26190b, 0 10px 20px rgba(0,0,0,0.24)",
 };
 
 const disabledButtonStyle: React.CSSProperties = {
@@ -329,6 +391,13 @@ const disabledButtonStyle: React.CSSProperties = {
   padding: "9px 11px",
   cursor: "not-allowed",
   fontWeight: 800,
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  ...primaryButtonStyle,
+  border: "1px solid rgba(148,163,184,0.58)",
+  background: "linear-gradient(180deg, #344050, #171f2b)",
+  color: "#e5edf7",
 };
 
 const dangerButtonStyle: React.CSSProperties = {
@@ -344,6 +413,48 @@ const selectedButtonStyle: React.CSSProperties = {
   display: "grid",
   gap: 4,
   textAlign: "left",
+};
+
+const cardButtonStyle: React.CSSProperties = {
+  border: "1px solid rgba(184,139,74,0.3)",
+  borderRadius: 0,
+  padding: 0,
+  background: "linear-gradient(180deg, rgba(32,38,47,0.94), rgba(12,14,19,0.98))",
+  color: "#d7c8a5",
+  cursor: "pointer",
+  textAlign: "left",
+  overflow: "hidden",
+  boxShadow: "0 5px 0 rgba(0,0,0,0.28), inset 0 0 24px rgba(255,255,255,0.025)",
+};
+
+const selectedCardButtonStyle: React.CSSProperties = {
+  ...cardButtonStyle,
+  border: "1px solid #e7c06b",
+  background: "linear-gradient(180deg, rgba(59,85,69,0.96), rgba(18,40,33,0.98))",
+};
+
+const disabledCardButtonStyle: React.CSSProperties = {
+  ...cardButtonStyle,
+  cursor: "not-allowed",
+  opacity: 0.72,
+};
+
+const countryCardStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "74px minmax(0, 1fr)",
+  gap: 10,
+  alignItems: "stretch",
+  padding: 8,
+};
+
+const countryArtStyle: React.CSSProperties = {
+  minHeight: 84,
+  border: "1px solid rgba(255,232,170,0.28)",
+  borderRadius: 6,
+  display: "grid",
+  placeItems: "center",
+  background:
+    "radial-gradient(circle at 50% 25%, rgba(244,204,112,0.28), transparent 42%), linear-gradient(160deg, rgba(25,48,68,0.85), rgba(18,13,20,0.96))",
 };
 
 const warButtonStyle: React.CSSProperties = {
@@ -374,18 +485,6 @@ const detailGridStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
-const modifierStyle: React.CSSProperties = {
-  border: "1px solid rgba(184,139,74,0.22)",
-  borderRadius: 3,
-  padding: "7px 8px",
-  background: "linear-gradient(180deg, rgba(23,29,37,0.78), rgba(9,13,19,0.82))",
-  color: "#cbd5e1",
-  display: "grid",
-  gap: 2,
-  fontSize: 12,
-  lineHeight: 1.35,
-};
-
 const combatStatusStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
@@ -399,7 +498,7 @@ const combatStatusStyle: React.CSSProperties = {
 
 const dicePanelStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1fr auto",
+  gridTemplateColumns: "minmax(0, 1fr)",
   alignItems: "center",
   gap: "2px 10px",
   border: "1px solid rgba(207,167,95,0.34)",
@@ -409,6 +508,70 @@ const dicePanelStyle: React.CSSProperties = {
   background:
     "linear-gradient(180deg, rgba(55,42,25,0.72), rgba(16,16,18,0.9))",
   boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+};
+
+const specialStripStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  padding: 10,
+  border: "1px solid rgba(207,167,95,0.34)",
+  background: "linear-gradient(180deg, rgba(42,31,20,0.75), rgba(9,13,19,0.9))",
+  color: "#f3e7cf",
+};
+
+const specialGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: 6,
+};
+
+const specialCellStyle: React.CSSProperties = {
+  display: "grid",
+  placeItems: "center",
+  gap: 2,
+  minHeight: 58,
+  padding: 5,
+  border: "1px solid rgba(148,163,184,0.22)",
+  background: "rgba(10,15,23,0.7)",
+  color: "#aeb8c7",
+  fontSize: 11,
+};
+
+const activeSpecialStyle: React.CSSProperties = {
+  ...specialCellStyle,
+  border: "1px solid #f8d37e",
+  background: "radial-gradient(circle at 50% 20%, rgba(248,211,126,0.24), rgba(10,15,23,0.82))",
+  color: "#fff1c9",
+  boxShadow: "0 0 18px rgba(248,211,126,0.18)",
+};
+
+const diceFaceStyle: React.CSSProperties = {
+  width: 46,
+  height: 46,
+  borderRadius: 8,
+  display: "grid",
+  placeItems: "center",
+  border: "2px solid #f1d28a",
+  background: "linear-gradient(145deg, #f5ead4, #b88438)",
+  color: "#2a1606",
+  fontWeight: 950,
+  boxShadow: "0 4px 0 rgba(0,0,0,0.42)",
+};
+
+const largeDiceWrapStyle: React.CSSProperties = {
+  width: 118,
+  height: 118,
+  margin: "4px auto",
+  display: "grid",
+  placeItems: "center",
+  border: "3px solid #f1d28a",
+  background:
+    "radial-gradient(circle at 35% 25%, #fff8e6, #d59d4a 48%, #6a3d16 100%)",
+  color: "#271405",
+  fontSize: 42,
+  fontWeight: 950,
+  boxShadow: "0 8px 0 rgba(0,0,0,0.46), 0 18px 34px rgba(0,0,0,0.36), inset 0 0 22px rgba(255,255,255,0.24)",
+  transformStyle: "preserve-3d",
 };
 
 const inputStyle: React.CSSProperties = {
@@ -421,3 +584,4 @@ const inputStyle: React.CSSProperties = {
   color: "#f8fafc",
   padding: "8px 10px",
 };
+
