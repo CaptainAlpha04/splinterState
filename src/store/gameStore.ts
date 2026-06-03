@@ -28,7 +28,7 @@ import {
   type CountryMetadataIndex,
 } from "../engine/content/countryContent";
 
-export type CampaignScale = "World War" | "Continent War" | "Regional War";
+export type CampaignScale = "World War" | "Continent War" | "Regional War" | "Story Mode";
 export type CampaignStage =
   | "PickScope"
   | "PickFavorite"
@@ -74,8 +74,11 @@ export type GameState = {
   logs: string[];
   selectedProvinceId: string | null;
   selectedCountryId: string | null;
+  focusedCountryId: string | null;
   selectedWarId: string | null;
   campaignScope: CampaignScope | null;
+  isStoryMode: boolean;
+  storyModeScale: "Regional War" | "Continent War" | "World War" | null;
   currentBet: WarBet | null;
   lastCombatOutcome: CombatOutcome | null;
   warTurns: Record<string, CombatTurnOutcome[]>;
@@ -106,6 +109,7 @@ export type GameState = {
   setAutoSpeed: (speed: number) => void;
   continueAfterWar: () => void;
   resolveSelectedWar: () => void;
+  focusCountry: (countryId: string | null) => void;
   resetCampaign: () => void;
 };
 
@@ -1202,8 +1206,11 @@ export const useGameStore = create<GameState>((set, get) => ({
   logs: [],
   selectedProvinceId: null,
   selectedCountryId: null,
+  focusedCountryId: null,
   selectedWarId: null,
   campaignScope: null,
+  isStoryMode: false,
+  storyModeScale: null,
   currentBet: null,
   lastCombatOutcome: null,
   warTurns: {},
@@ -1232,6 +1239,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         ownerId: p.countryId,
         adjacentProvinceIds: p.adjacentProvinceIds,
         isIncinerated: false,
+        rings: p.rings,
+        bounds: p.bounds,
       };
     });
 
@@ -1284,6 +1293,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       selectedCountryId: null,
       selectedWarId: null,
       campaignScope: null,
+      isStoryMode: false,
+      storyModeScale: null,
       currentBet: null,
       lastCombatOutcome: null,
       warTurns: {},
@@ -1318,11 +1329,22 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({ selectedCountryId: countryId });
   },
 
+  focusCountry: (countryId) => {
+    set({ focusedCountryId: countryId });
+  },
+
   setCampaignScale: (scale) => {
     const state = get();
-    const scope = buildScope(scale, state.selectedCountryId, state.countries, state.capitals);
+    const isStory = scale === "Story Mode";
+    const actualScale = isStory ? "Regional War" : scale;
+    const scope = buildScope(actualScale, state.selectedCountryId, state.countries, state.capitals);
     set({
-      campaignScope: scope,
+      isStoryMode: isStory,
+      storyModeScale: isStory ? "Regional War" : null,
+      campaignScope: {
+        ...scope,
+        scale: isStory ? "Story Mode" : scope.scale
+      },
       stage: "PickFavorite",
       logs: [...state.logs, `${scale} selected: ${scope.label}. Pick a campaign favorite.`],
     });
@@ -1339,12 +1361,17 @@ export const useGameStore = create<GameState>((set, get) => ({
       return;
     }
 
-    const campaignScope = buildScope(state.campaignScope.scale, countryId, state.countries, state.capitals);
+    const isStory = state.isStoryMode;
+    const buildScale = isStory ? "Regional War" : state.campaignScope.scale;
+    const campaignScope = buildScope(buildScale, countryId, state.countries, state.capitals);
     const nextTickets = state.player.tickets - cost;
     saveTicketWallet(nextTickets);
 
     set({
-      campaignScope,
+      campaignScope: {
+        ...campaignScope,
+        scale: isStory ? "Story Mode" : campaignScope.scale,
+      },
       player: {
         ...state.player,
         tickets: nextTickets,
@@ -1580,8 +1607,57 @@ export const useGameStore = create<GameState>((set, get) => ({
       const winnerId = scopedAliveIds[0] ?? null;
       const countryPlacements = winnerId ? { ...state.countryPlacements, [winnerId]: 1 } : state.countryPlacements;
       const rank = campaignFavoritePlacement(state.player.campaignFavoriteCountryId, winnerId, countryPlacements);
-      const payout = campaignPayoutForRank(state.player.campaignStake, rank);
       const favorite = state.player.campaignFavoriteCountryId ? state.countries[state.player.campaignFavoriteCountryId] : null;
+
+      // Story Mode progression check
+      if (state.isStoryMode && winnerId && winnerId === state.player.campaignFavoriteCountryId) {
+        const currentScale = state.storyModeScale;
+        if (currentScale === "Regional War") {
+          const nextScope = buildScope("Continent War", winnerId, state.countries, state.capitals);
+          set({
+            storyModeScale: "Continent War",
+            campaignScope: {
+              ...nextScope,
+              scale: "Story Mode",
+            },
+            activeWars: [],
+            selectedWarId: null,
+            stage: "EventHorizon",
+            completedWarResults: [],
+            forcedWars: [],
+            campaignPhase: state.campaignPhase + 1,
+            logs: [
+              ...state.logs,
+              `🏆 REGIONAL DOMINANCE ACHIEVED! ${favorite?.flag} ${favorite?.name} has unified the region of ${state.campaignScope?.label}.`,
+              `🌍 Story Mode: Entering CONTINENTAL DOMINANCE in ${nextScope.label}. Roll event modifiers for the new continental contenders.`
+            ]
+          });
+          return;
+        } else if (currentScale === "Continent War") {
+          const nextScope = buildScope("World War", winnerId, state.countries, state.capitals);
+          set({
+            storyModeScale: "World War",
+            campaignScope: {
+              ...nextScope,
+              scale: "Story Mode",
+            },
+            activeWars: [],
+            selectedWarId: null,
+            stage: "EventHorizon",
+            completedWarResults: [],
+            forcedWars: [],
+            campaignPhase: state.campaignPhase + 1,
+            logs: [
+              ...state.logs,
+              `🏆 CONTINENTAL DOMINANCE ACHIEVED! ${favorite?.flag} ${favorite?.name} has unified the continent of ${state.campaignScope?.label}.`,
+              `🌌 Story Mode: Entering WORLD DOMINANCE. Roll event modifiers for the remaining global powers.`
+            ]
+          });
+          return;
+        }
+      }
+
+      const payout = campaignPayoutForRank(state.player.campaignStake, rank);
       const nextTickets = state.player.tickets + payout;
       saveTicketWallet(nextTickets);
       set({
@@ -1944,8 +2020,57 @@ export const useGameStore = create<GameState>((set, get) => ({
       const winnerId = aliveInScope[0] ?? null;
       const countryPlacements = winnerId ? { ...state.countryPlacements, [winnerId]: 1 } : state.countryPlacements;
       const rank = campaignFavoritePlacement(state.player.campaignFavoriteCountryId, winnerId, countryPlacements);
-      const payout = campaignPayoutForRank(state.player.campaignStake, rank);
       const favorite = state.player.campaignFavoriteCountryId ? state.countries[state.player.campaignFavoriteCountryId] : null;
+
+      // Story Mode progression check
+      if (state.isStoryMode && winnerId && winnerId === state.player.campaignFavoriteCountryId) {
+        const currentScale = state.storyModeScale;
+        if (currentScale === "Regional War") {
+          const nextScope = buildScope("Continent War", winnerId, state.countries, state.capitals);
+          set({
+            storyModeScale: "Continent War",
+            campaignScope: {
+              ...nextScope,
+              scale: "Story Mode",
+            },
+            activeWars: [],
+            selectedWarId: null,
+            stage: "EventHorizon",
+            completedWarResults: [],
+            forcedWars: [],
+            campaignPhase: state.campaignPhase + 1,
+            logs: [
+              ...state.logs,
+              `🏆 REGIONAL DOMINANCE ACHIEVED! ${favorite?.flag} ${favorite?.name} has unified the region of ${state.campaignScope?.label}.`,
+              `🌍 Story Mode: Entering CONTINENTAL DOMINANCE in ${nextScope.label}. Roll event modifiers for the new continental contenders.`
+            ]
+          });
+          return;
+        } else if (currentScale === "Continent War") {
+          const nextScope = buildScope("World War", winnerId, state.countries, state.capitals);
+          set({
+            storyModeScale: "World War",
+            campaignScope: {
+              ...nextScope,
+              scale: "Story Mode",
+            },
+            activeWars: [],
+            selectedWarId: null,
+            stage: "EventHorizon",
+            completedWarResults: [],
+            forcedWars: [],
+            campaignPhase: state.campaignPhase + 1,
+            logs: [
+              ...state.logs,
+              `🏆 CONTINENTAL DOMINANCE ACHIEVED! ${favorite?.flag} ${favorite?.name} has unified the continent of ${state.campaignScope?.label}.`,
+              `🌌 Story Mode: Entering WORLD DOMINANCE. Roll event modifiers for the remaining global powers.`
+            ]
+          });
+          return;
+        }
+      }
+
+      const payout = campaignPayoutForRank(state.player.campaignStake, rank);
       const nextTickets = state.player.tickets + payout;
       saveTicketWallet(nextTickets);
       set({

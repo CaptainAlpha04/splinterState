@@ -5,16 +5,22 @@ import type React from "react";
 import type { Country } from "../../engine/models/country";
 import MapSvg from "../../ui/components/MapSvg";
 import Sidebar from "../../ui/components/Sidebar";
+import BattleRoom from "../../ui/components/BattleRoom";
 import { getCountryDevelopmentScore, getCountryTier, type CampaignScale, useGameStore } from "../../store/gameStore";
 import { loadMapAssets } from "../../lib/data/loadMapAssets";
 
 export default function GamePage() {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+
   const isLoaded = useGameStore(state => state.isLoaded);
   const initializeGame = useGameStore(state => state.initializeGame);
   const stage = useGameStore(state => state.stage);
   const player = useGameStore(state => state.player);
   const countries = useGameStore(state => state.countries);
   const campaignScope = useGameStore(state => state.campaignScope);
+  const isStoryMode = useGameStore(state => state.isStoryMode);
+  const storyModeScale = useGameStore(state => state.storyModeScale);
   const activeWars = useGameStore(state => state.activeWars);
   const completedWarResults = useGameStore(state => state.completedWarResults);
   const countryPlacements = useGameStore(state => state.countryPlacements);
@@ -36,6 +42,24 @@ export default function GamePage() {
   }, [initializeGame]);
 
   useGameAudio(stage, logs);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      setIsCollapsed(mobile);
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Auto-open sidebar when a war ends (transitions to WarSelection or CombatResult)
+  useEffect(() => {
+    if (stage === "WarSelection" || stage === "CombatResult") {
+      setIsCollapsed(false);
+    }
+  }, [stage]);
 
   useEffect(() => {
     if (!isAutoPlaying || stage !== "Combat" || isResolvingTurn || activeWars.length === 0) return;
@@ -70,19 +94,132 @@ export default function GamePage() {
     [completedWarResults, countries]
   );
 
+  const activeCountryCount = useMemo(() => {
+    const eligible = campaignScope ? new Set(campaignScope.eligibleCountryIds) : null;
+    return Object.values(countries).filter(
+      c => c.provinces.length > 0 && (!eligible || eligible.has(c.id))
+    ).length;
+  }, [countries, campaignScope]);
+
+  const floatingStatusBarStyle: React.CSSProperties = {
+    position: "absolute",
+    top: isMobile ? 0 : 16,
+    left: isMobile ? 0 : "50%",
+    transform: isMobile ? "none" : "translateX(-50%)",
+    width: isMobile ? "100%" : "auto",
+    maxWidth: isMobile ? "100%" : "calc(100% - 32px)",
+    zIndex: 10,
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "stretch",
+    gap: isMobile ? 4 : 12,
+    padding: isMobile ? "6px 8px" : "6px 16px",
+    background: "rgba(22, 18, 14, 0.95)",
+    backdropFilter: "blur(10px)",
+    border: isMobile ? "none" : "1.5px solid rgba(210, 165, 82, 0.55)",
+    borderBottom: "2px solid rgba(210, 165, 82, 0.55)",
+    borderRadius: isMobile ? 0 : 8,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,234,170,0.1)",
+    overflowX: "auto",
+    whiteSpace: "nowrap",
+  };
+
+  const autoControlStyle: React.CSSProperties = {
+    position: "absolute",
+    left: isMobile ? 10 : 20,
+    top: isMobile ? 64 : 80,
+    zIndex: 8,
+    display: "flex",
+    gap: 6,
+    padding: 6,
+    background: "linear-gradient(180deg, rgba(35,25,15,0.92), rgba(7,10,15,0.9))",
+    border: "1px solid rgba(207,167,95,0.42)",
+    boxShadow: "0 10px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.08)",
+  };
+
+  const notificationStackStyle: React.CSSProperties = {
+    position: "absolute",
+    left: "50%",
+    transform: "translateX(-50%)",
+    top: isMobile ? 100 : 76,
+    width: isMobile ? "calc(100% - 20px)" : 420,
+    display: "grid",
+    gap: 6,
+    pointerEvents: "none",
+    zIndex: 12,
+  };
+
+  const battleRoomContainerStyle: React.CSSProperties = {
+    position: "absolute",
+    bottom: isMobile ? 20 : 20,
+    left: isMobile ? 10 : "50%",
+    right: isMobile ? 10 : "auto",
+    transform: isMobile ? "none" : "translateX(-50%)",
+    zIndex: 15,
+    width: isMobile ? "auto" : 480,
+    maxWidth: isMobile ? "none" : "calc(100% - 40px)",
+  };
+
+  const headerTitleStyle: React.CSSProperties = {
+    position: "absolute",
+    top: isMobile ? 8 : 22,
+    left: isMobile ? 10 : 20,
+    zIndex: 12,
+    fontFamily: "'Cinzel', 'Georgia', serif",
+    fontSize: isMobile ? 15 : 24,
+    fontWeight: 900,
+    textTransform: "uppercase",
+    color: "#f6ead0",
+    letterSpacing: 2,
+    textShadow: "1px 1px 0px #bfa36d, 2px 2px 0px #9f8452, 3px 3px 0px #7f6538, 4px 4px 5px rgba(0,0,0,0.8)",
+    pointerEvents: "none",
+    display: "flex",
+    alignItems: "center",
+    gap: isMobile ? 6 : 10,
+  };
+
   return (
     <main style={shellStyle}>
-      <div style={statusBarStyle}>
-        <div style={brandPlateStyle}>
-          <span style={brandKickerStyle}>Splinter States</span>
-          <strong>Campaign Command</strong>
-        </div>
+      <h1 style={headerTitleStyle}>
+        <svg
+          width={isMobile ? 20 : 28}
+          height={isMobile ? 20 : 28}
+          viewBox="0 0 64 64"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          style={{ filter: "drop-shadow(0 0 6px rgba(207, 167, 95, 0.5))", flexShrink: 0 }}
+        >
+          <path d="M12 24C16 12 28 8 32 18C36 8 48 12 52 24C44 26 36 28 32 38C28 28 20 26 12 24Z" fill="url(#phoenixGrad)" />
+          <path d="M32 38C30 46 24 52 16 56C24 52 28 48 32 44C36 48 40 52 48 56C40 52 34 46 32 38Z" fill="#a97b35" />
+          <path d="M32 14C31 16 30 18 30 20C30 24 32 26 32 28C32 26 34 24 34 20C34 18 33 16 32 14Z" fill="#ffe9b7" />
+          <path d="M32 8C31.5 10 32.5 11 32 12C31.5 11 31 10 32 8Z" fill="#ffe9b7" />
+          <defs>
+            <linearGradient id="phoenixGrad" x1="12" y1="24" x2="52" y2="24" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stopColor="#a97b35" />
+              <stop offset="0.5" stopColor="#ffe9b7" />
+              <stop offset="1" stopColor="#a97b35" />
+            </linearGradient>
+          </defs>
+        </svg>
+        <span>Splinter States</span>
+      </h1>
+
+      <div style={floatingStatusBarStyle}>
         <HudMetric label="Stage" value={stageLabel(stage)} />
+        {campaignScope && <HudMetric label="Powers" value={`${activeCountryCount} active`} />}
         <HudMetric label="Tickets" value={player.tickets.toString()} />
-        <HudMetric label="Scope" value={campaignScope?.label ?? "Unclaimed"} />
+        <HudMetric
+          label="Scope"
+          value={
+            campaignScope
+              ? `${campaignScope.label}${isStoryMode ? ` (${storyModeScaleLabel(storyModeScale)})` : ""}`
+              : "Unclaimed"
+          }
+        />
         <HudMetric label="Favorite" value={favorite ? `${favorite.flag} ${favorite.name}` : "None"} />
         <HudMetric label="Wars" value={`${activeWars.length} live / ${completedWarResults.length} done`} />
       </div>
+
       <section style={mapDeckStyle}>
         <div style={mapFrameStyle}>
           <div style={autoControlStyle}>
@@ -101,12 +238,15 @@ export default function GamePage() {
               </button>
             ))}
           </div>
-          {frontRunner ? <FrontRunnerPanel entry={frontRunner} /> : null}
+
+          {frontRunner ? <FrontRunnerPanel entry={frontRunner} isMobile={isMobile} /> : null}
+
           {isLoaded && svgMarkup ? (
             <MapSvg svgMarkup={svgMarkup} />
           ) : (
             <div style={loadingStyle}>Loading simulation...</div>
           )}
+
           <div style={notificationStackStyle}>
             {notifications.map((log, index) => (
               <div key={`${logs.length}-${index}-${log}`} style={noticeStyle}>
@@ -116,8 +256,19 @@ export default function GamePage() {
           </div>
         </div>
       </section>
-      <Sidebar />
-      {stage === "PickScope" ? <StartScene tickets={player.tickets} onPickScale={setCampaignScale} /> : null}
+
+      <Sidebar isCollapsed={isCollapsed} setIsCollapsed={setIsCollapsed} isMobile={isMobile} />
+
+      {(stage === "Betting" || stage === "Combat") && (
+        <div style={battleRoomContainerStyle}>
+          <BattleRoom />
+        </div>
+      )}
+
+      {stage === "PickScope" ? (
+        <StartScene tickets={player.tickets} onPickScale={setCampaignScale} isMobile={isMobile} />
+      ) : null}
+
       {stage === "CampaignWon" || stage === "GameOver" ? (
         <EndScene
           won={stage === "CampaignWon"}
@@ -129,8 +280,10 @@ export default function GamePage() {
           tickets={player.tickets}
           wars={completedWarResults.length}
           onRestart={resetCampaign}
+          isMobile={isMobile}
         />
       ) : null}
+
       <style jsx global>{`
         @keyframes splinterNoticeFade {
           0% { opacity: 0; transform: translateY(-6px); }
@@ -145,6 +298,15 @@ export default function GamePage() {
         @keyframes medalDrop {
           0% { opacity: 0; transform: translateY(-12px) scale(0.82); }
           100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .scale-card-hover {
+          transition: all 0.25s ease-in-out;
+        }
+        .scale-card-hover:hover {
+          transform: translateY(-4px) scale(1.02);
+          border-color: #f8d37e !important;
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), 0 12px 24px rgba(248,211,126,0.15) !important;
+          background: linear-gradient(180deg, rgba(120,90,50,0.45), rgba(8,12,18,0.96)) !important;
         }
       `}</style>
     </main>
@@ -210,34 +372,62 @@ function useGameAudio(stage: string, logs: string[]) {
   }, [logs]);
 }
 
-function StartScene({ tickets, onPickScale }: { tickets: number; onPickScale: (scale: CampaignScale) => void }) {
+function StartScene({ tickets, onPickScale, isMobile }: { tickets: number; onPickScale: (scale: CampaignScale) => void; isMobile: boolean }) {
   const scales: Array<{ scale: CampaignScale; title: string; icon: string; copy: string }> = [
+    { scale: "Story Mode", title: "Story Mode", icon: "👑", copy: "Progression: Regional ➔ Continental ➔ World Dominance." },
     { scale: "World War", title: "World War", icon: "🌍", copy: "Every surviving country enters the long campaign." },
     { scale: "Continent War", title: "Continent War", icon: "🛡️", copy: "Anchor on one continent and lock the camera there." },
     { scale: "Regional War", title: "Regional War", icon: "🗡️", copy: "A shorter knife fight inside one theater." },
   ];
 
+  const responsiveScenePanelStyle: React.CSSProperties = {
+    position: "relative",
+    width: "min(760px, calc(100vw - 32px))",
+    maxHeight: "90vh",
+    overflowY: "auto",
+    border: "2.5px solid #cfa24b",
+    borderRadius: 8,
+    padding: isMobile ? 16 : 24,
+    background:
+      "linear-gradient(135deg, rgba(207,167,95,0.08), transparent 34%), linear-gradient(180deg, rgba(28,21,14,0.99), rgba(11,14,19,0.99))",
+    boxShadow: "0 34px 90px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.12), inset 0 0 50px rgba(207,167,95,0.08)",
+  };
+
+  const responsiveScaleGridStyle: React.CSSProperties = {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: isMobile ? "1fr" : "repeat(4, minmax(0, 1fr))",
+    gap: 12,
+  };
+
   return (
     <div style={sceneOverlayStyle}>
-      <section style={scenePanelStyle}>
+      <section style={responsiveScenePanelStyle}>
         <div style={warRoomBackdropStyle}>
           <span>⚔️</span><span>🎲</span><span>☢️</span><span>👑</span>
         </div>
         <div style={sceneTitleBlockStyle}>
-          <span>Splinter States</span>
-          <h1>Choose Your War</h1>
+          <span style={{ fontSize: isMobile ? 12 : 14, color: "#cfa24b", textTransform: "uppercase", fontWeight: "bold", letterSpacing: 1.5 }}>Splinter States</span>
+          <h1 style={{ fontSize: isMobile ? 26 : 36, margin: "4px 0", fontFamily: "'Cinzel', 'Georgia', serif", fontWeight: 900, color: "#fff" }}>Choose Your War</h1>
           <p style={sceneLeadStyle}>Banked tickets carry between campaigns. Pick the scale, then buy an anchor country on the map.</p>
         </div>
         <div style={walletRibbonStyle}>
-          <span>🎟️ War Treasury</span>
-          <strong>{tickets}</strong>
+          <span style={{ fontSize: 13, textTransform: "uppercase", fontWeight: "bold", letterSpacing: 0.5 }}>🎟️ War Treasury</span>
+          <strong style={{ fontSize: 18, color: "#fff" }}>{tickets}</strong>
         </div>
-        <div style={scaleGridStyle}>
+        <div style={responsiveScaleGridStyle}>
           {scales.map(item => (
-            <button key={item.scale} type="button" onClick={() => onPickScale(item.scale)} style={scaleCardStyle}>
+            <button
+              key={item.scale}
+              type="button"
+              onClick={() => onPickScale(item.scale)}
+              style={scaleCardStyle}
+              className="scale-card-hover"
+            >
               <span style={scaleIconStyle}>{item.icon}</span>
-              <strong>{item.title}</strong>
-              <span>{item.copy}</span>
+              <strong style={{ fontSize: 16, color: "#fff5d6" }}>{item.title}</strong>
+              <span style={{ fontSize: 11, opacity: 0.85, lineHeight: 1.35 }}>{item.copy}</span>
             </button>
           ))}
         </div>
@@ -269,6 +459,7 @@ function EndScene({
   tickets,
   wars,
   onRestart,
+  isMobile,
 }: {
   won: boolean;
   favoriteId: string | null;
@@ -279,58 +470,111 @@ function EndScene({
   tickets: number;
   wars: number;
   onRestart: () => void;
+  isMobile: boolean;
 }) {
   const winner = leaderboard[0];
+
+  const responsiveScenePanelStyle: React.CSSProperties = {
+    position: "relative",
+    width: "min(760px, calc(100vw - 32px))",
+    maxHeight: "90vh",
+    overflowY: "auto",
+    border: "3px double",
+    borderRadius: 12,
+    padding: isMobile ? 16 : 24,
+    borderColor: won ? "#78dc96" : "#dc5a46",
+    background: won 
+      ? "linear-gradient(135deg, rgba(120,220,150,0.1), transparent 32%), linear-gradient(180deg, rgba(24,38,28,0.99), rgba(8,12,16,0.99))"
+      : "linear-gradient(135deg, rgba(220,90,70,0.1), transparent 32%), linear-gradient(180deg, rgba(38,24,22,0.99), rgba(8,12,16,0.99))",
+    boxShadow: won 
+      ? "0 34px 90px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.14), inset 0 0 50px rgba(120,220,150,0.08)"
+      : "0 34px 90px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.12), inset 0 0 50px rgba(220,90,70,0.08)",
+  };
+
+  const responsiveLedgerGridStyle: React.CSSProperties = {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
+    gap: 12,
+    margin: "12px 0 16px",
+  };
+
+  const responsiveScoreGridStyle: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))",
+    gap: 10,
+  };
+
+  const endRestartButtonStyle: React.CSSProperties = {
+    ...restartButtonStyle,
+    background: won
+      ? "linear-gradient(180deg, #3d7d4f, #1e4d2b)"
+      : "linear-gradient(180deg, #9c2f23, #57140e)",
+    borderColor: won ? "#78dc96" : "#dc5a46",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18), 0 3px 0 rgba(0,0,0,0.4)",
+    borderRadius: 4,
+    width: "100%",
+    padding: "14px 20px",
+    fontSize: 16,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  };
+
   return (
     <div style={sceneOverlayStyle}>
-      <section style={{ ...scenePanelStyle, borderColor: won ? "rgba(120, 220, 150, 0.6)" : "rgba(220, 90, 70, 0.62)" }}>
+      <section style={responsiveScenePanelStyle}>
         {won ? <div style={victoryBurstStyle} /> : null}
         <div style={endBannerStyle}>
           {won ? "🏆" : "💀"}
         </div>
         <div style={sceneTitleBlockStyle}>
-          <span>{won ? "Campaign Victory" : "Campaign Lost"}</span>
-          <h1>{won ? "Placed on the Podium" : "Your Favorite Fell"}</h1>
+          <span style={{ fontSize: isMobile ? 12 : 14, color: won ? "#78dc96" : "#dc5a46", textTransform: "uppercase", fontWeight: "bold", letterSpacing: 1.5 }}>
+            {won ? "Campaign Victory" : "Campaign Lost"}
+          </span>
+          <h1 style={{ fontSize: isMobile ? 26 : 36, margin: "4px 0", fontFamily: "'Cinzel', 'Georgia', serif", fontWeight: 900, color: "#fff" }}>
+            {won ? "Podium Champion" : "Your Favorite Fell"}
+          </h1>
           <p style={sceneLeadStyle}>
             Winner: {winner ? `${winner.country.flag} ${winner.country.name}` : "Unknown"}. Your line: {favoriteName}
             {favoriteRank ? `, rank ${favoriteRank}` : ""}. The treasury has been updated for the next campaign.
           </p>
         </div>
         <div style={scoreCardStyle}>
-          <strong>{favoriteName}</strong>
-          <div style={scoreGridStyle}>
-            <span><small>Final Wallet</small><b>{tickets}</b></span>
-            <span><small>Wars Resolved</small><b>{wars}</b></span>
-            <span><small>Your Rank</small><b>{favoriteRank ? `#${favoriteRank}` : "Unranked"}</b></span>
+          <strong style={{ color: "#fff5d6", fontSize: 16 }}>{favoriteName}</strong>
+          <div style={responsiveScoreGridStyle}>
+            <span style={{ display: "flex", flexDirection: "column" }}><small style={{ color: "#a8b3c2", fontSize: 10 }}>Final Wallet</small><b style={{ fontSize: 18, color: "#fff" }}>{tickets}</b></span>
+            <span style={{ display: "flex", flexDirection: "column" }}><small style={{ color: "#a8b3c2", fontSize: 10 }}>Wars Resolved</small><b style={{ fontSize: 18, color: "#fff" }}>{wars}</b></span>
+            <span style={{ display: "flex", flexDirection: "column" }}><small style={{ color: "#a8b3c2", fontSize: 10 }}>Your Rank</small><b style={{ fontSize: 18, color: won ? "#78dc96" : "#dc5a46" }}>{favoriteRank ? `#${favoriteRank}` : "Unranked"}</b></span>
           </div>
         </div>
-        <div style={ledgerGridStyle}>
+        <div style={responsiveLedgerGridStyle}>
           <section style={ledgerPanelStyle}>
-            <strong>Final Ranking</strong>
+            <strong style={{ color: "#cfa24b", borderBottom: "1px solid rgba(193,150,84,0.2)", display: "block", paddingBottom: 4 }}>Final Ranking</strong>
             <div style={rankListStyle}>
               {leaderboard.slice(0, 8).map(entry => (
                 <div key={entry.country.id} style={entry.country.id === favoriteId ? favoriteRankRowStyle : rankRowStyle}>
                   <b>#{entry.rank}</b>
                   <span>{entry.country.flag} {entry.country.name}</span>
-                  <small>{entry.tier} / {entry.country.provinces.length} provinces / score {entry.score}</small>
+                  <small style={{ color: "#8492a6", fontSize: 11 }}>{entry.tier} / {entry.country.provinces.length} provinces / score {entry.score}</small>
                 </div>
               ))}
             </div>
           </section>
           <section style={ledgerPanelStyle}>
-            <strong>Promotions</strong>
+            <strong style={{ color: "#cfa24b", borderBottom: "1px solid rgba(193,150,84,0.2)", display: "block", paddingBottom: 4 }}>Promotions</strong>
             <div style={rankListStyle}>
               {promotions.length > 0 ? promotions.map(item => (
                 <div key={`${item.countryId}-${item.formationName}`} style={rankRowStyle}>
                   <b>⬆</b>
                   <span>{item.countryName}</span>
-                  <small>formed {item.formationName}</small>
+                  <small style={{ color: "#8492a6", fontSize: 11 }}>formed {item.formationName}</small>
                 </div>
-              )) : <p style={sceneLeadStyle}>No major promotions recorded.</p>}
+              )) : <p style={{ ...sceneLeadStyle, fontSize: 12 }}>No major promotions recorded.</p>}
             </div>
           </section>
         </div>
-        <button type="button" onClick={onRestart} style={restartButtonStyle}>
+        <button type="button" onClick={onRestart} style={endRestartButtonStyle}>
           New Campaign
         </button>
       </section>
@@ -338,8 +582,29 @@ function EndScene({
   );
 }
 
-function FrontRunnerPanel({ entry }: { entry: LeaderboardEntry }) {
+function FrontRunnerPanel({ entry, isMobile }: { entry: LeaderboardEntry; isMobile: boolean }) {
   const detail = `${entry.country.name}: ${entry.tier}, score ${entry.score}, ${entry.country.provinces.length} provinces, ${entry.country.government}, ${entry.country.religion}.`;
+  
+  const frontRunnerStyle: React.CSSProperties = {
+    position: "absolute",
+    left: isMobile ? 10 : 20,
+    top: isMobile ? 120 : 136,
+    zIndex: 8,
+    minWidth: 168,
+    maxWidth: 230,
+    display: "grid",
+    gap: 2,
+    padding: "7px 10px",
+    color: "#f6e8c8",
+    background: "linear-gradient(135deg, rgba(85,58,24,0.94), rgba(7,11,16,0.9))",
+    border: "1px solid rgba(248,211,126,0.44)",
+    boxShadow: "0 14px 32px rgba(0,0,0,0.4), inset 0 0 22px rgba(248,211,126,0.08)",
+    clipPath: "polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%)",
+    pointerEvents: "auto",
+    textShadow: "0 1px 0 #000",
+    fontSize: 12,
+  };
+
   return (
     <div style={frontRunnerStyle} title={detail}>
       <span>👑 Favorite</span>
@@ -378,6 +643,7 @@ function buildLeaderboard(
 function HudMetric({ label, value }: { label: string; value: string }) {
   const icons: Record<string, string> = {
     Stage: "⏳",
+    Powers: "👑",
     Tickets: "🎟️",
     Scope: "🗺️",
     Favorite: "👑",
@@ -385,8 +651,10 @@ function HudMetric({ label, value }: { label: string; value: string }) {
   };
   return (
     <div style={hudMetricStyle}>
-      <span>{icons[label] ?? "◆"} {label}</span>
-      <strong>{value}</strong>
+      <span style={{ fontSize: 10, color: "#bfa36d", textTransform: "uppercase", fontWeight: 700, letterSpacing: 0.5, display: "flex", alignItems: "center", gap: 3 }}>
+        {icons[label] ?? "◆"} {label}
+      </span>
+      <strong style={{ fontSize: 13, color: "#fff5d6", fontWeight: 800 }}>{value}</strong>
     </div>
   );
 }
@@ -406,10 +674,17 @@ function stageLabel(stage: string) {
   return labels[stage] ?? stage;
 }
 
+function storyModeScaleLabel(scale: "Regional War" | "Continent War" | "World War" | null) {
+  if (scale === "Regional War") return "Region";
+  if (scale === "Continent War") return "Continent";
+  if (scale === "World War") return "World";
+  return "";
+}
+
+// Styling definitions
 const shellStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) 430px",
-  gridTemplateRows: "64px minmax(0, 1fr)",
+  position: "relative",
+  width: "100vw",
   height: "100vh",
   background:
     "radial-gradient(circle at 50% -20%, rgba(173,126,49,0.22), transparent 34%), linear-gradient(180deg, #19120b 0%, #0b1119 42%, #03060a 100%)",
@@ -417,66 +692,47 @@ const shellStyle: React.CSSProperties = {
   overflow: "hidden",
 };
 
-const statusBarStyle: React.CSSProperties = {
-  gridColumn: "1 / -1",
-  display: "grid",
-  gridTemplateColumns: "240px repeat(5, minmax(120px, 1fr))",
-  alignItems: "stretch",
-  borderBottom: "2px solid rgba(210, 165, 82, 0.55)",
-  background:
-    "linear-gradient(180deg, rgba(72,51,28,0.98), rgba(24,21,18,0.98)), repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 12px)",
-  boxShadow: "0 10px 30px rgba(0,0,0,0.48), inset 0 -1px 0 rgba(255,234,170,0.18)",
+const mapDeckStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  zIndex: 1,
+  overflow: "hidden",
+};
+
+const mapFrameStyle: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  position: "relative",
+  background: "#04080d",
+  boxShadow: "inset 0 0 70px rgba(0,0,0,0.42)",
 };
 
 const brandPlateStyle: React.CSSProperties = {
-  padding: "8px 14px",
+  padding: "4px 14px 4px 0",
   borderRight: "1px solid rgba(193, 150, 84, 0.34)",
   display: "grid",
   alignContent: "center",
   color: "#f6ead0",
   textShadow: "0 1px 0 #000",
-  background: "radial-gradient(circle at 10% 20%, rgba(255,226,147,0.2), transparent 38%)",
 };
 
 const brandKickerStyle: React.CSSProperties = {
   color: "#bfa36d",
-  fontSize: 11,
+  fontSize: 10,
   fontWeight: 800,
   textTransform: "uppercase",
-  letterSpacing: 0,
+  letterSpacing: 0.5,
 };
 
 const hudMetricStyle: React.CSSProperties = {
   minWidth: 0,
-  padding: "9px 12px",
+  padding: "4px 12px",
   borderRight: "1px solid rgba(193, 150, 84, 0.22)",
-  display: "grid",
-  alignContent: "center",
-  gap: 1,
-  background:
-    "linear-gradient(90deg, rgba(255,226,147,0.075), rgba(255,255,255,0))",
-};
-
-const mapDeckStyle: React.CSSProperties = {
-  minHeight: 0,
-  padding: 0,
-  overflow: "hidden",
   display: "flex",
-  alignItems: "center",
+  flexDirection: "column",
   justifyContent: "center",
-};
-
-const mapFrameStyle: React.CSSProperties = {
-  width: "100%",
-  maxWidth: "100%",
-  height: "100%",
-  maxHeight: "100%",
-  position: "relative",
-  border: "0",
-  borderRadius: 0,
-  background: "#04080d",
-  boxShadow:
-    "inset 0 0 70px rgba(0,0,0,0.42)",
+  alignItems: "flex-start",
+  background: "linear-gradient(90deg, rgba(255,226,147,0.04), rgba(255,255,255,0))",
 };
 
 const loadingStyle: React.CSSProperties = {
@@ -487,108 +743,30 @@ const loadingStyle: React.CSSProperties = {
   color: "#c7b991",
 };
 
-const notificationStackStyle: React.CSSProperties = {
-  position: "absolute",
-  right: 14,
-  top: 14,
-  width: 320,
-  display: "grid",
-  gap: 8,
-  pointerEvents: "none",
-};
-
-const autoControlStyle: React.CSSProperties = {
-  position: "absolute",
-  left: 14,
-  top: 14,
-  zIndex: 8,
-  display: "flex",
-  gap: 6,
-  padding: 6,
-  background: "linear-gradient(180deg, rgba(35,25,15,0.92), rgba(7,10,15,0.9))",
-  border: "1px solid rgba(207,167,95,0.42)",
-  boxShadow: "0 10px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.08)",
-};
-
-const frontRunnerStyle: React.CSSProperties = {
-  position: "absolute",
-  left: 14,
-  top: 62,
-  zIndex: 8,
-  minWidth: 168,
-  maxWidth: 230,
-  display: "grid",
-  gap: 2,
-  padding: "7px 10px",
-  color: "#f6e8c8",
-  background: "linear-gradient(135deg, rgba(85,58,24,0.94), rgba(7,11,16,0.9))",
-  border: "1px solid rgba(248,211,126,0.44)",
-  boxShadow: "0 14px 32px rgba(0,0,0,0.4), inset 0 0 22px rgba(248,211,126,0.08)",
-  clipPath: "polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%)",
-  pointerEvents: "auto",
-  textShadow: "0 1px 0 #000",
-  fontSize: 12,
-};
-
-const autoButtonStyle: React.CSSProperties = {
-  minWidth: 38,
-  height: 34,
-  border: "1px solid rgba(248,211,126,0.44)",
-  background: "linear-gradient(180deg, #6f4a1d, #1b1208)",
-  color: "#fff1c9",
-  cursor: "pointer",
-  fontWeight: 900,
-};
-
-const speedButtonStyle: React.CSSProperties = {
-  ...autoButtonStyle,
-  minWidth: 42,
-  background: "linear-gradient(180deg, #263142, #0f141d)",
-  color: "#c9d2df",
-};
-
-const activeSpeedButtonStyle: React.CSSProperties = {
-  ...speedButtonStyle,
-  border: "1px solid #f8d37e",
-  background: "linear-gradient(180deg, #9b6a26, #3c240d)",
-  color: "#fff1c9",
-};
-
 const noticeStyle: React.CSSProperties = {
-  border: "1px solid rgba(207, 167, 95, 0.42)",
-  borderRadius: 3,
-  padding: "8px 10px",
-  background:
-    "linear-gradient(180deg, rgba(32,27,20,0.92), rgba(9,13,18,0.9))",
+  border: "1px solid rgba(210, 165, 82, 0.35)",
+  borderRadius: 4,
+  padding: "5px 12px",
+  background: "linear-gradient(90deg, transparent, rgba(22,18,14,0.92) 15%, rgba(22,18,14,0.92) 85%, transparent)",
   color: "#f2e7cb",
-  fontSize: 13,
-  lineHeight: 1.35,
-  boxShadow: "0 8px 20px rgba(0,0,0,0.34)",
-  animation: "splinterNoticeFade 7s ease forwards",
+  fontSize: 11.5,
+  fontWeight: 600,
+  textAlign: "center",
+  lineHeight: 1.3,
+  boxShadow: "0 4px 10px rgba(0,0,0,0.35)",
+  animation: "splinterNoticeFade 6s ease forwards",
+  textShadow: "0 1px 2px rgba(0,0,0,0.9)",
 };
 
 const sceneOverlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
-  zIndex: 20,
+  zIndex: 30,
   display: "grid",
   placeItems: "center",
   background:
     "radial-gradient(circle at 50% 32%, rgba(106,71,28,0.56), rgba(3,6,10,0.9) 62%), repeating-linear-gradient(45deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 9px)",
   backdropFilter: "blur(3px)",
-};
-
-const scenePanelStyle: React.CSSProperties = {
-  position: "relative",
-  width: "min(760px, calc(100vw - 48px))",
-  border: "2px solid rgba(228, 181, 92, 0.68)",
-  borderRadius: 0,
-  padding: 24,
-  background:
-    "linear-gradient(135deg, rgba(98,67,29,0.22), transparent 34%), linear-gradient(180deg, rgba(48,37,24,0.97), rgba(11,14,19,0.99))",
-  boxShadow: "0 34px 90px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.14), inset 0 0 50px rgba(228,181,92,0.08)",
-  clipPath: "polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 22px 100%, 0 calc(100% - 22px))",
-  overflow: "hidden",
 };
 
 const sceneTitleBlockStyle: React.CSSProperties = {
@@ -635,16 +813,8 @@ const walletRibbonStyle: React.CSSProperties = {
   boxShadow: "inset 0 0 24px rgba(248,211,126,0.08)",
 };
 
-const scaleGridStyle: React.CSSProperties = {
-  position: "relative",
-  zIndex: 1,
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 12,
-};
-
 const scaleCardStyle: React.CSSProperties = {
-  minHeight: 150,
+  minHeight: 120,
   border: "1px solid rgba(230,190,120,0.5)",
   borderRadius: 0,
   padding: 14,
@@ -698,24 +868,9 @@ const endBannerStyle: React.CSSProperties = {
   animation: "medalDrop 420ms ease-out both",
 };
 
-const scoreGridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 10,
-};
-
-const ledgerGridStyle: React.CSSProperties = {
-  position: "relative",
-  zIndex: 1,
-  display: "grid",
-  gridTemplateColumns: "1.2fr 0.8fr",
-  gap: 12,
-  margin: "12px 0 16px",
-};
-
 const ledgerPanelStyle: React.CSSProperties = {
-  minHeight: 180,
-  maxHeight: 260,
+  minHeight: 140,
+  maxHeight: 220,
   overflow: "auto",
   padding: 12,
   border: "1px solid rgba(230,190,120,0.36)",
@@ -763,4 +918,28 @@ const restartButtonStyle: React.CSSProperties = {
   color: "#fff1cf",
   fontWeight: 900,
   cursor: "pointer",
+};
+
+const autoButtonStyle: React.CSSProperties = {
+  minWidth: 38,
+  height: 34,
+  border: "1px solid rgba(248,211,126,0.44)",
+  background: "linear-gradient(180deg, #6f4a1d, #1b1208)",
+  color: "#fff1c9",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const speedButtonStyle: React.CSSProperties = {
+  ...autoButtonStyle,
+  minWidth: 42,
+  background: "linear-gradient(180deg, #263142, #0f141d)",
+  color: "#c9d2df",
+};
+
+const activeSpeedButtonStyle: React.CSSProperties = {
+  ...speedButtonStyle,
+  border: "1px solid #f8d37e",
+  background: "linear-gradient(180deg, #9b6a26, #3c240d)",
+  color: "#fff1c9",
 };

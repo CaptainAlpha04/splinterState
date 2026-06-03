@@ -5,4 +5,6 @@ export type Province = {
   ownerId: string;
   adjacentProvinceIds: string[];
   isIncinerated: boolean;
+  rings?: number[][][];
+  bounds?: number[];
 };

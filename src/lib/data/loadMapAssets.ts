@@ -3,6 +3,8 @@ export type ProvinceRecord = {
   name: string;
   countryId: string;
   adjacentProvinceIds: string[];
+  rings: number[][][];
+  bounds: number[];
 };
 
 export type CountryRecord = {

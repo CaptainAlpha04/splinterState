@@ -32,6 +32,46 @@ function quantize(value, precision) {
   return Math.round(value * scale) / scale;
 }
 
+function getSqSegDist(p, p1, p2) {
+  let x = p1[0];
+  let y = p1[1];
+  let dx = p2[0] - x;
+  let dy = p2[1] - y;
+  if (dx !== 0 || dy !== 0) {
+    const t = ((p[0] - x) * dx + (p[1] - y) * dy) / (dx * dx + dy * dy);
+    if (t > 1) {
+      x = p2[0];
+      y = p2[1];
+    } else if (t > 0) {
+      x += dx * t;
+      y += dy * t;
+    }
+  }
+  dx = p[0] - x;
+  dy = p[1] - y;
+  return dx * dx + dy * dy;
+}
+
+function simplifyRDP(points, epsilon) {
+  if (points.length <= 2) return points;
+  let maxSqDist = 0;
+  let index = 0;
+  const end = points.length - 1;
+  for (let i = 1; i < end; i++) {
+    const sqDist = getSqSegDist(points[i], points[0], points[end]);
+    if (sqDist > maxSqDist) {
+      index = i;
+      maxSqDist = sqDist;
+    }
+  }
+  if (maxSqDist > epsilon * epsilon) {
+    const results1 = simplifyRDP(points.slice(0, index + 1), epsilon);
+    const results2 = simplifyRDP(points.slice(index), epsilon);
+    return results1.slice(0, results1.length - 1).concat(results2);
+  }
+  return [points[0], points[end]];
+}
+
 function pointKey(point) {
   return `${point[0]},${point[1]}`;
 }
@@ -132,9 +172,7 @@ function prepare() {
   const admin1 = readJson(ADMIN1_FILE);
   const capitalsRaw = readJson(CAPITALS_FILE);
 
-  const provinces = [];
-  const provinceCentroids = new Map();
-
+  const rawProvinces = [];
   admin1.features.forEach((feature) => {
     const props = feature.properties || {};
     const countryId = toId(props.ADM0_A3 || props.adm0_a3 || props.SOV_A3);
@@ -148,6 +186,28 @@ function prepare() {
         quantize(point[1], 5),
       ])
     );
+    rawProvinces.push({ id: provinceId, rings });
+  });
+
+  const adjacency = buildAdjacency(rawProvinces);
+
+  const provinces = [];
+  const provinceCentroids = new Map();
+
+  admin1.features.forEach((feature) => {
+    const props = feature.properties || {};
+    const countryId = toId(props.ADM0_A3 || props.adm0_a3 || props.SOV_A3);
+    const admin1Name = props.NAME_1 || props.name || props.NAME || "Unknown";
+    const admin1Code = props.ISO_3166_2 || props.adm1_code || admin1Name;
+    const provinceId = toId(`${countryId}-${admin1Code}`);
+
+    const rings = extractRings(feature.geometry).map((ring) => {
+      const simplified = simplifyRDP(ring, 0.02);
+      return simplified.map((point) => [
+        quantize(point[0], 5),
+        quantize(point[1], 5),
+      ]);
+    });
 
     const centroid = computeCentroid(rings[0] || []);
     provinceCentroids.set(provinceId, centroid);
@@ -160,14 +220,33 @@ function prepare() {
     });
   });
 
-  const adjacency = buildAdjacency(provinces);
+  const provinceRecords = provinces.map((province) => {
+    const projectedRings = province.rings.map((ring) =>
+      ring.map((pt) => [
+        quantize(pt[0] + 180, 2),
+        quantize(90 - pt[1], 2),
+      ])
+    );
 
-  const provinceRecords = provinces.map((province) => ({
-    id: province.id,
-    name: province.name,
-    countryId: province.countryId,
-    adjacentProvinceIds: adjacency[province.id] || [],
-  }));
+    let minX = 360, maxX = 0, minY = 180, maxY = 0;
+    projectedRings.forEach((ring) => {
+      ring.forEach((pt) => {
+        if (pt[0] < minX) minX = pt[0];
+        if (pt[0] > maxX) maxX = pt[0];
+        if (pt[1] < minY) minY = pt[1];
+        if (pt[1] > maxY) maxY = pt[1];
+      });
+    });
+
+    return {
+      id: province.id,
+      name: province.name,
+      countryId: province.countryId,
+      adjacentProvinceIds: adjacency[province.id] || [],
+      rings: projectedRings,
+      bounds: [quantize(minX, 2), quantize(minY, 2), quantize(maxX, 2), quantize(maxY, 2)],
+    };
+  });
 
   const capitals = capitalsRaw.features
     .filter((feature) => {

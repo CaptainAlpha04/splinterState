@@ -327,7 +327,7 @@ export const FORMATION_RULES: FormationRule[] = [
     requiredCountryIds: ["DEU", "AUT"],
     requiredSubregions: ["Western Europe", "Central Europe", "Eastern Europe"],
     minimumAbsorbed: 5,
-    priority: 101,
+    priority: 101,  
   },
   {
     id: "byzantine_empire",
