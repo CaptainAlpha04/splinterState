@@ -5,4 +5,6 @@ export type ActiveWar = {
   attackerOccupiedCapital: boolean;
   defenderOccupiedCapital: boolean;
   incineratedProvinceIds: string[];
+  usedNukesByCountryId?: Record<string, boolean>;
+  initiativePenalties?: Record<string, number>;
 };

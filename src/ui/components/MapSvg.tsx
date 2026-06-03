@@ -183,6 +183,23 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
   const inspectedProvince = pinnedProvince ?? hoveredProvince ?? selectedProvince;
   const inspectedCountry = inspectedProvince ? countries[inspectedProvince.ownerId] : null;
   const hoveredCountryId = (pinnedProvince ?? hoveredProvince)?.ownerId ?? null;
+  const hoveredFrontierProvinceIds = useMemo(() => {
+    const owned = new Set<string>();
+    const adjacentForeign = new Set<string>();
+    const country = hoveredCountryId ? countries[hoveredCountryId] : null;
+    if (!country) return { owned, adjacentForeign };
+
+    country.provinces.forEach(provinceId => {
+      owned.add(provinceId);
+      provinces[provinceId]?.adjacentProvinceIds.forEach(adjacentId => {
+        if (provinces[adjacentId]?.ownerId !== hoveredCountryId) {
+          adjacentForeign.add(adjacentId);
+        }
+      });
+    });
+
+    return { owned, adjacentForeign };
+  }, [countries, hoveredCountryId, provinces]);
   const inspectedCapital = inspectedCountry
     ? capitals.find(capital => capital.countryId === inspectedCountry.id)
     : null;
@@ -330,19 +347,33 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
       const isAntarctica = province?.initialCountryId === "ATA" || ownerId === "ATA";
       const isOutOfScope = eligibleCountryIds ? !eligibleCountryIds.has(ownerId) : false;
       const isSelected = selectedProvinceId === path.id || selectedCountryId === ownerId;
+      const isHoveredCountryBorder = hoveredFrontierProvinceIds.owned.has(path.id);
+      const isHoveredForeignBorder = hoveredFrontierProvinceIds.adjacentForeign.has(path.id);
       const isRecentCapture = recentCapturedProvinceIds.has(path.id);
 
       path.style.display = isAntarctica ? "none" : "";
       path.style.fill = fill;
-      path.style.opacity = isOutOfScope ? "0.1" : "0.92";
-      path.style.stroke = isSelected ? "#f8f1d0" : "rgba(3, 8, 14, 0.55)";
-      path.style.strokeWidth = selectedCountryId === ownerId ? "0.42px" : "0.09px";
+      path.style.opacity = isOutOfScope ? "0.1" : isHoveredCountryBorder || isHoveredForeignBorder ? "0.98" : "0.92";
+      path.style.stroke = isSelected
+        ? "#f8f1d0"
+        : isHoveredCountryBorder
+          ? "#ffe7a3"
+          : isHoveredForeignBorder
+            ? "rgba(255,172,80,0.72)"
+            : "rgba(3, 8, 14, 0.55)";
+      path.style.strokeWidth = isSelected || isHoveredCountryBorder
+        ? "0.42px"
+        : isHoveredForeignBorder
+          ? "0.24px"
+          : "0.09px";
       path.style.vectorEffect = "non-scaling-stroke";
       path.style.cursor = "pointer";
+      path.classList.toggle("province-frontier-focus", isHoveredCountryBorder);
+      path.classList.toggle("province-frontier-neighbor", isHoveredForeignBorder);
       path.classList.toggle("province-captured", isRecentCapture);
       path.style.transition = "fill 180ms ease, opacity 140ms ease, stroke 120ms ease";
     });
-  }, [countryColors, eligibleCountryIds, provinces, recentCapturedProvinceIds, selectedCountryId, selectedProvinceId]);
+  }, [countryColors, eligibleCountryIds, hoveredFrontierProvinceIds, provinces, recentCapturedProvinceIds, selectedCountryId, selectedProvinceId]);
 
   function clampScale(value: number) {
     return Math.min(9, Math.max(1, value));
@@ -528,14 +559,20 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           if (!country) return null;
           const isFocus = selectedCountryId === country.id || hoveredCountryId === country.id;
           const showFullName = viewport.scale >= 2.6 && country.name.length <= 18;
-          const label = isFocus ? `${country.flag} ${country.name}` : showFullName ? country.name : country.id;
+          const displayName = isFocus
+            ? truncateMapLabel(country.name, viewport.scale >= 3 ? 18 : 14)
+            : showFullName
+              ? truncateMapLabel(country.name, 16)
+              : country.id;
+          const label = isFocus ? `${country.flag} ${displayName}` : displayName;
           const fontSize = (isFocus ? 2.15 : 1.45) * Math.max(0.42, Math.min(1, 1 / Math.sqrt(viewport.scale)));
-          const labelWidth = Math.max(isFocus ? 12 : 5.5, label.length * fontSize * 1.55 + 2.4);
+          const labelWidth = Math.min(isFocus ? 34 : 20, Math.max(isFocus ? 12 : 5.5, label.length * fontSize * 1.45 + 2.4));
           const labelHeight = (isFocus ? 4.2 : 2.95) * Math.max(0.58, Math.min(1, 1 / Math.sqrt(viewport.scale)));
           const labelY = -labelHeight * 0.82;
 
           return (
             <g key={`${capital.countryId}-label`} transform={`translate(${capital.longitude + 180} ${90 - capital.latitude})`}>
+              <title>{country.flag} {country.name}</title>
               <rect
                 x={0.7}
                 y={labelY}
@@ -640,19 +677,25 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
             <i style={{ width: `${pinnedProvinceId ? 100 : hoverProgress}%` }} />
           </div>
           <div className="dossier-stats">
-            <DossierStat icon="🎡" label="Wheel" value={inspectedWheel?.total ?? 0} detail="Chance area on the initiative wheel. Higher wheel means this country is more likely to act before its enemy rolls." />
+            <DossierStat icon="🎯" label="Initiative" value={inspectedWheel?.total ?? 0} detail="Turn-order chance only. Initiative decides who acts on a roll; it is not used for campaign score or long-war dominance." />
             <DossierStat icon="🏰" label="Land" value={inspectedWheel?.provincePower ?? 0} detail="Controlled development plus current territory footprint. This is the backbone of combat momentum." />
             <DossierStat icon="📜" label="Dev" value={getCountryDevelopmentScore(inspectedCountry)} detail="Population, area, strategic power, current footprint, and formations. This decides tier and buy-in more than raw province count." />
-            <DossierStat icon="☀️" label="Faith" value={signed(getCountryReligionModifier(inspectedCountry))} detail={`${getCountryReligionModifierLabel(inspectedCountry)} adds directly to wheel power for this country.`} />
-            <DossierStat icon="⚖️" label="Gov" value={governmentModifierLabel(inspectedCountry.government)} detail="Government ideology modifier. It adds to wheel power alongside faith, events, and special modifiers." />
+            <DossierStat icon="☀️" label="Faith" value={signed(getCountryReligionModifier(inspectedCountry))} detail={`${getCountryReligionModifierLabel(inspectedCountry)} adds directly to initiative for this country.`} />
+            <DossierStat icon="⚖️" label="Gov" value={governmentModifierLabel(inspectedCountry.government)} detail="Government ideology modifier. It adds to initiative alongside faith, events, and special modifiers." />
             <DossierStat icon="🌩️" label="Event" value={signed(inspectedCountry.eventModifier)} detail="Temporary modifier rolled during the Event Horizon. It resets next phase." />
             <DossierStat icon="🎟️" label="Cost" value={getCountryCost(inspectedCountry)} detail="Favorite buy-in. Expensive powers have stronger starting position and better payout risk." />
             <DossierStat icon="🧭" label="Provinces" value={inspectedCountry.provinces.length} detail="Current province count. It affects capture volume, but no longer defines empire rank by itself." />
+            <DossierStat icon="🪖" label="Camps" value={inspectedCountry.armyCampsCount} detail="Army camps are permanent territory-bound assets. Each camp adds +25 initiative and is inherited by a full annexation victor." />
+            <DossierStat icon="📡" label="Intercept" value={inspectedCountry.interceptorCharges} detail="Interceptor charges stack up to 3. The next enemy positive conquest roll is nullified, then initiative immediately re-spins." />
+            <DossierStat icon="📣" label="Blitz" value={inspectedCountry.blitzActions} detail="Blitz actions are banked public support. The next initiative win chains a back-to-back secondary action roll." />
           </div>
           <div className="dossier-mods">
+            <ModifierChip label="Army Camp +25 each" detail="Long-term initiative scaling. Annexing a country inherits its accumulated camps." icon="🪖" />
+            <ModifierChip label={`Interceptor ${inspectedCountry.interceptorCharges}/3`} detail="Defensive counter-play. Automatically blocks the next enemy +1 to +8 conquest roll and forces a re-spin." icon="📡" />
+            <ModifierChip label={`Blitz Actions ${inspectedCountry.blitzActions}`} detail="Aggressive tempo. The next won initiative spin gets a secondary action roll in the same turn." icon="📣" />
             <ModifierChip
               label={`${getCountryReligionModifierLabel(inspectedCountry)} ${signed(getCountryReligionModifier(inspectedCountry))}`}
-              detail={`${inspectedCountry.religion} modifies initiative power by ${signed(getCountryReligionModifier(inspectedCountry))}.`}
+              detail={`${inspectedCountry.religion} modifies initiative by ${signed(getCountryReligionModifier(inspectedCountry))}.`}
               icon="☀️"
             />
             {inspectedCountry.specialModifiers.map(modifier => (
@@ -680,6 +723,12 @@ export default function MapSvg({ svgMarkup }: MapSvgProps) {
           filter: brightness(1.2) saturate(1.18);
           stroke: #f8f1d0 !important;
           stroke-width: 0.38px !important;
+        }
+        .province-frontier-focus {
+          filter: brightness(1.13) saturate(1.2) drop-shadow(0 0 1.8px rgba(248,211,126,0.42));
+        }
+        .province-frontier-neighbor {
+          filter: brightness(1.03) saturate(1.08);
         }
         .province-captured {
           animation: provinceCapture 1.1s ease-out both;
@@ -938,3 +987,13 @@ function modifierIcon(label: string) {
   return "✦";
 }
 
+function truncateMapLabel(name: string, maxLength: number) {
+  if (name.length <= maxLength) return name;
+  const words = name.split(" ");
+  if (words.length > 1) {
+    const initials = words.slice(1).map(word => word[0]).join("");
+    const compact = `${words[0]} ${initials}`;
+    if (compact.length <= maxLength) return compact;
+  }
+  return `${name.slice(0, Math.max(3, maxLength - 1)).trimEnd()}…`;
+}

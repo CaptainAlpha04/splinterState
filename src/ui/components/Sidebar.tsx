@@ -99,7 +99,7 @@ export default function Sidebar() {
 
       {stage === "PickFavorite" ? (
         <Panel>
-          <CountryIntel country={selectedCountry} provinceName={selectedProvince?.name} />
+          <CountryIntel country={selectedCountry} provinceName={selectedProvince?.name} compact />
           {selectedCountry ? (
             <>
               <div style={priceRowStyle}>
@@ -200,7 +200,7 @@ export default function Sidebar() {
                       <small>{latestTurn ? `${countries[latestTurn.activeCountryId]?.name ?? latestTurn.activeCountryId} acted / ${latestTurn.action}` : "Awaiting player roll"}</small>
                     </div>
                   </div>
-                  {latestTurn?.roll === 0 ? <SpecialOutcomeStrip active={latestTurn.action} /> : null}
+                  {latestTurn?.roll === 0 ? <SpecialOutcomeStrip active={latestTurn.action} weights={latestTurn.directiveWeights} /> : null}
                   <button type="button" disabled={isResolvingTurn} onClick={rollSelectedWarTurn} style={isResolvingTurn ? disabledButtonStyle : primaryButtonStyle}>
                     {isResolvingTurn ? "Resolving..." : "Roll Dice"}
                   </button>
@@ -242,27 +242,32 @@ export default function Sidebar() {
   );
 }
 
-function SpecialOutcomeStrip({ active }: { active: string }) {
+function SpecialOutcomeStrip({ active, weights }: { active: string; weights?: Record<"camp" | "interceptor" | "support" | "nuke", number> }) {
   const outcomes = [
-    { id: "nuke", icon: "☢️", label: "Nuke" },
-    { id: "interceptor", icon: "🛡️", label: "Interceptor" },
-    { id: "camp", icon: "⛺", label: "Camp" },
-    { id: "support", icon: "📣", label: "Support" },
+    { id: "camp", icon: "🪖", label: "Army Camp", detail: "Permanent +25 initiative. If annexed, the victor inherits all camps." },
+    { id: "interceptor", icon: "📡", label: "Interceptor", detail: "Adds 1 intercept charge, up to 3. The next enemy positive conquest roll is nullified and the initiative wheel re-spins." },
+    { id: "support", icon: "📣", label: "Public Support", detail: "Adds 1 blitz action. The next initiative win chains a back-to-back secondary action roll." },
+    { id: "nuke", icon: "☢️", label: "Tactical Nuke", detail: "Once per country per war. Burns provinces around the enemy capital and inflicts -100 war initiative on the target." },
   ];
   return (
     <div style={specialStripStyle}>
-      <strong>Zero Special</strong>
+      <strong>Zero Directive</strong>
       <div style={specialGridStyle}>
         {outcomes.map(outcome => (
-          <span key={outcome.id} style={active === outcome.id ? activeSpecialStyle : specialCellStyle}>
+          <span key={outcome.id} style={active === outcome.id ? activeSpecialStyle : specialCellStyle} title={outcome.detail}>
             <b>{outcome.icon}</b>
             {outcome.label}
-            <small>25%</small>
+            <small>{weights ? `${directivePercent(weights, outcome.id as keyof typeof weights)}%` : "weighted"}</small>
           </span>
         ))}
       </div>
     </div>
   );
+}
+
+function directivePercent(weights: Record<"camp" | "interceptor" | "support" | "nuke", number>, key: keyof typeof weights) {
+  const total = Math.max(1, weights.camp + weights.interceptor + weights.support + weights.nuke);
+  return Math.round((weights[key] / total) * 100);
 }
 
 function CountryCard({ country, selected }: { country: Country; selected: boolean }) {
@@ -276,7 +281,7 @@ function CountryCard({ country, selected }: { country: Country; selected: boolea
       <div style={{ display: "grid", gap: 4 }}>
         <strong style={{ color: selected ? "#fff4d2" : "#f3e7cf" }}>{country.name}</strong>
         <span>{getCountryTier(country)} / {country.government} / {country.religion}</span>
-        <span>Power {wheel.total} / Dev {getCountryDevelopmentScore(country)} / Faith {signed(getCountryReligionModifier(country))}</span>
+        <span>Initiative {wheel.total} / Dev {getCountryDevelopmentScore(country)} / Faith {signed(getCountryReligionModifier(country))}</span>
       </div>
     </div>
   );
@@ -309,8 +314,10 @@ function CountryIntel({ country, provinceName, compact = false }: { country: Cou
 
   const wheel = countryWheelBreakdown(country, country.provinces.length, false);
 
+  const tooltip = `${country.name}: ${getCountryTier(country)}, ${country.government}, ${country.religion}. Development ${getCountryDevelopmentScore(country)}, initiative ${wheel.total}, ${country.provinces.length} provinces. Camps ${country.armyCampsCount}, intercept ${country.interceptorCharges}/3, blitz ${country.blitzActions}.`;
+
   return (
-    <div style={{ display: "grid", gap: compact ? 4 : 8 }}>
+    <div style={{ display: "grid", gap: compact ? 5 : 8 }} title={tooltip}>
       <div>
         <div style={{ color: "#f8fafc", fontWeight: 800 }}>{country.flag} {country.name}</div>
         {provinceName ? <div style={{ color: "#8492a6", fontSize: 13 }}>Province: {provinceName}</div> : null}
@@ -318,10 +325,17 @@ function CountryIntel({ country, provinceName, compact = false }: { country: Cou
       <div style={detailGridStyle}>
         <span>Tier</span><strong>{getCountryTier(country)}</strong>
         <span>Buy-in</span><strong>{getCountryCost(country)}</strong>
-        <span>Government</span><strong>{country.government}</strong>
-        <span>Religion</span><strong>{country.religion}</strong>
-        <span>Development</span><strong>{getCountryDevelopmentScore(country)}</strong>
-        <span>Wheel power</span><strong>{wheel.total}</strong>
+        <span>Initiative</span><strong>{wheel.total}</strong>
+        {!compact ? (
+          <>
+            <span>Government</span><strong>{country.government}</strong>
+            <span>Religion</span><strong>{country.religion}</strong>
+            <span>Development</span><strong>{getCountryDevelopmentScore(country)}</strong>
+            <span>Camps</span><strong>{country.armyCampsCount}</strong>
+            <span>Intercept</span><strong>{country.interceptorCharges}/3</strong>
+            <span>Blitz</span><strong>{country.blitzActions}</strong>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -534,7 +548,10 @@ const specialCellStyle: React.CSSProperties = {
   border: "1px solid rgba(148,163,184,0.22)",
   background: "rgba(10,15,23,0.7)",
   color: "#aeb8c7",
-  fontSize: 11,
+  fontSize: 10,
+  lineHeight: 1.1,
+  textAlign: "center",
+  cursor: "help",
 };
 
 const activeSpecialStyle: React.CSSProperties = {

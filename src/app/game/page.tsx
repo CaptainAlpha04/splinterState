@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
+import type { Country } from "../../engine/models/country";
 import MapSvg from "../../ui/components/MapSvg";
 import Sidebar from "../../ui/components/Sidebar";
-import { type CampaignScale, useGameStore } from "../../store/gameStore";
+import { getCountryDevelopmentScore, getCountryTier, type CampaignScale, useGameStore } from "../../store/gameStore";
 import { loadMapAssets } from "../../lib/data/loadMapAssets";
 
 export default function GamePage() {
@@ -16,6 +17,7 @@ export default function GamePage() {
   const campaignScope = useGameStore(state => state.campaignScope);
   const activeWars = useGameStore(state => state.activeWars);
   const completedWarResults = useGameStore(state => state.completedWarResults);
+  const countryPlacements = useGameStore(state => state.countryPlacements);
   const logs = useGameStore(state => state.logs);
   const setCampaignScale = useGameStore(state => state.setCampaignScale);
   const resetCampaign = useGameStore(state => state.resetCampaign);
@@ -49,6 +51,24 @@ export default function GamePage() {
     ? countries[player.campaignFavoriteCountryId]
     : null;
   const notifications = logs.slice(-3).reverse();
+  const leaderboard = useMemo(
+    () => buildLeaderboard(countries, countryPlacements, campaignScope?.eligibleCountryIds ?? null),
+    [campaignScope?.eligibleCountryIds, countries, countryPlacements]
+  );
+  const frontRunner = leaderboard[0] ?? null;
+  const favoriteRank = favorite ? leaderboard.find(entry => entry.country.id === favorite.id)?.rank ?? countryPlacements[favorite.id] ?? null : null;
+  const promotions = useMemo(
+    () => completedWarResults
+      .filter(result => result.formationName && result.winnerId)
+      .map(result => ({
+        countryId: result.winnerId as string,
+        countryName: countries[result.winnerId as string]?.name ?? result.winnerId,
+        formationName: result.formationName as string,
+      }))
+      .slice(-8)
+      .reverse(),
+    [completedWarResults, countries]
+  );
 
   return (
     <main style={shellStyle}>
@@ -81,6 +101,7 @@ export default function GamePage() {
               </button>
             ))}
           </div>
+          {frontRunner ? <FrontRunnerPanel entry={frontRunner} /> : null}
           {isLoaded && svgMarkup ? (
             <MapSvg svgMarkup={svgMarkup} />
           ) : (
@@ -100,7 +121,11 @@ export default function GamePage() {
       {stage === "CampaignWon" || stage === "GameOver" ? (
         <EndScene
           won={stage === "CampaignWon"}
+          favoriteId={favorite?.id ?? null}
           favoriteName={favorite ? `${favorite.flag} ${favorite.name}` : "your favorite"}
+          favoriteRank={favoriteRank}
+          leaderboard={leaderboard}
+          promotions={promotions}
           tickets={player.tickets}
           wars={completedWarResults.length}
           onRestart={resetCampaign}
@@ -221,7 +246,41 @@ function StartScene({ tickets, onPickScale }: { tickets: number; onPickScale: (s
   );
 }
 
-function EndScene({ won, favoriteName, tickets, wars, onRestart }: { won: boolean; favoriteName: string; tickets: number; wars: number; onRestart: () => void }) {
+type LeaderboardEntry = {
+  country: Country;
+  rank: number;
+  score: number;
+  tier: string;
+};
+
+type PromotionEntry = {
+  countryId: string;
+  countryName: string;
+  formationName: string;
+};
+
+function EndScene({
+  won,
+  favoriteId,
+  favoriteName,
+  favoriteRank,
+  leaderboard,
+  promotions,
+  tickets,
+  wars,
+  onRestart,
+}: {
+  won: boolean;
+  favoriteId: string | null;
+  favoriteName: string;
+  favoriteRank: number | null;
+  leaderboard: LeaderboardEntry[];
+  promotions: PromotionEntry[];
+  tickets: number;
+  wars: number;
+  onRestart: () => void;
+}) {
+  const winner = leaderboard[0];
   return (
     <div style={sceneOverlayStyle}>
       <section style={{ ...scenePanelStyle, borderColor: won ? "rgba(120, 220, 150, 0.6)" : "rgba(220, 90, 70, 0.62)" }}>
@@ -231,16 +290,45 @@ function EndScene({ won, favoriteName, tickets, wars, onRestart }: { won: boolea
         </div>
         <div style={sceneTitleBlockStyle}>
           <span>{won ? "Campaign Victory" : "Campaign Lost"}</span>
-          <h1>{won ? "You Won" : "Your Favorite Fell"}</h1>
-          <p style={sceneLeadStyle}>{won ? "The realm stands alone. The treasury has been updated for the next campaign." : "The campaign ledger is closed. Remaining tickets stay in your treasury."}</p>
+          <h1>{won ? "Placed on the Podium" : "Your Favorite Fell"}</h1>
+          <p style={sceneLeadStyle}>
+            Winner: {winner ? `${winner.country.flag} ${winner.country.name}` : "Unknown"}. Your line: {favoriteName}
+            {favoriteRank ? `, rank ${favoriteRank}` : ""}. The treasury has been updated for the next campaign.
+          </p>
         </div>
         <div style={scoreCardStyle}>
           <strong>{favoriteName}</strong>
           <div style={scoreGridStyle}>
             <span><small>Final Wallet</small><b>{tickets}</b></span>
             <span><small>Wars Resolved</small><b>{wars}</b></span>
-            <span><small>Campaign Result</small><b>{won ? "Rank 1" : "Eliminated"}</b></span>
+            <span><small>Your Rank</small><b>{favoriteRank ? `#${favoriteRank}` : "Unranked"}</b></span>
           </div>
+        </div>
+        <div style={ledgerGridStyle}>
+          <section style={ledgerPanelStyle}>
+            <strong>Final Ranking</strong>
+            <div style={rankListStyle}>
+              {leaderboard.slice(0, 8).map(entry => (
+                <div key={entry.country.id} style={entry.country.id === favoriteId ? favoriteRankRowStyle : rankRowStyle}>
+                  <b>#{entry.rank}</b>
+                  <span>{entry.country.flag} {entry.country.name}</span>
+                  <small>{entry.tier} / {entry.country.provinces.length} provinces / score {entry.score}</small>
+                </div>
+              ))}
+            </div>
+          </section>
+          <section style={ledgerPanelStyle}>
+            <strong>Promotions</strong>
+            <div style={rankListStyle}>
+              {promotions.length > 0 ? promotions.map(item => (
+                <div key={`${item.countryId}-${item.formationName}`} style={rankRowStyle}>
+                  <b>⬆</b>
+                  <span>{item.countryName}</span>
+                  <small>formed {item.formationName}</small>
+                </div>
+              )) : <p style={sceneLeadStyle}>No major promotions recorded.</p>}
+            </div>
+          </section>
         </div>
         <button type="button" onClick={onRestart} style={restartButtonStyle}>
           New Campaign
@@ -248,6 +336,43 @@ function EndScene({ won, favoriteName, tickets, wars, onRestart }: { won: boolea
       </section>
     </div>
   );
+}
+
+function FrontRunnerPanel({ entry }: { entry: LeaderboardEntry }) {
+  const detail = `${entry.country.name}: ${entry.tier}, score ${entry.score}, ${entry.country.provinces.length} provinces, ${entry.country.government}, ${entry.country.religion}.`;
+  return (
+    <div style={frontRunnerStyle} title={detail}>
+      <span>👑 Favorite</span>
+      <strong>{entry.country.flag} {entry.country.name}</strong>
+      <small>{entry.tier} / {entry.score}</small>
+    </div>
+  );
+}
+
+function buildLeaderboard(
+  countries: Record<string, Country>,
+  placements: Record<string, number>,
+  eligibleCountryIds: string[] | null
+): LeaderboardEntry[] {
+  const eligible = eligibleCountryIds ? new Set(eligibleCountryIds) : null;
+  const entries = Object.values(countries)
+    .filter(country => !eligible || eligible.has(country.id))
+    .map(country => {
+      const isAlive = country.provinces.length > 0;
+      const rank = isAlive ? 1 : placements[country.id] ?? 999;
+      return {
+        country,
+        rank,
+        score: getCountryDevelopmentScore(country),
+        tier: getCountryTier(country),
+      };
+    });
+
+  return entries.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    if (b.score !== a.score) return b.score - a.score;
+    return b.country.provinces.length - a.country.provinces.length;
+  });
 }
 
 function HudMetric({ label, value }: { label: string; value: string }) {
@@ -383,6 +508,26 @@ const autoControlStyle: React.CSSProperties = {
   background: "linear-gradient(180deg, rgba(35,25,15,0.92), rgba(7,10,15,0.9))",
   border: "1px solid rgba(207,167,95,0.42)",
   boxShadow: "0 10px 24px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.08)",
+};
+
+const frontRunnerStyle: React.CSSProperties = {
+  position: "absolute",
+  left: 14,
+  top: 62,
+  zIndex: 8,
+  minWidth: 168,
+  maxWidth: 230,
+  display: "grid",
+  gap: 2,
+  padding: "7px 10px",
+  color: "#f6e8c8",
+  background: "linear-gradient(135deg, rgba(85,58,24,0.94), rgba(7,11,16,0.9))",
+  border: "1px solid rgba(248,211,126,0.44)",
+  boxShadow: "0 14px 32px rgba(0,0,0,0.4), inset 0 0 22px rgba(248,211,126,0.08)",
+  clipPath: "polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%)",
+  pointerEvents: "auto",
+  textShadow: "0 1px 0 #000",
+  fontSize: 12,
 };
 
 const autoButtonStyle: React.CSSProperties = {
@@ -557,6 +702,49 @@ const scoreGridStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
   gap: 10,
+};
+
+const ledgerGridStyle: React.CSSProperties = {
+  position: "relative",
+  zIndex: 1,
+  display: "grid",
+  gridTemplateColumns: "1.2fr 0.8fr",
+  gap: 12,
+  margin: "12px 0 16px",
+};
+
+const ledgerPanelStyle: React.CSSProperties = {
+  minHeight: 180,
+  maxHeight: 260,
+  overflow: "auto",
+  padding: 12,
+  border: "1px solid rgba(230,190,120,0.36)",
+  background: "linear-gradient(180deg, rgba(17,23,31,0.9), rgba(5,8,12,0.94))",
+  boxShadow: "inset 0 0 24px rgba(230,190,120,0.06)",
+};
+
+const rankListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 7,
+  marginTop: 9,
+};
+
+const rankRowStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "34px minmax(0, 1fr)",
+  gap: "2px 8px",
+  alignItems: "center",
+  padding: "7px 8px",
+  color: "#e8dfc8",
+  background: "linear-gradient(90deg, rgba(255,255,255,0.055), rgba(255,255,255,0.015))",
+  border: "1px solid rgba(255,255,255,0.07)",
+};
+
+const favoriteRankRowStyle: React.CSSProperties = {
+  ...rankRowStyle,
+  color: "#fff1c8",
+  background: "linear-gradient(90deg, rgba(130,88,25,0.72), rgba(25,18,11,0.88))",
+  border: "1px solid rgba(248,211,126,0.42)",
 };
 
 const victoryBurstStyle: React.CSSProperties = {

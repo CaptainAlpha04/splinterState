@@ -28,7 +28,7 @@ export function countryWheelBreakdown(
   hasEnemyCapital: boolean
 ): WheelBreakdown {
   const special = country.specialModifiers.reduce((total, modifier) => total + modifier.value, 0);
-  const armyCamps = country.armyCampsCount * 10;
+  const armyCamps = country.armyCampsCount * 25;
   const capital = hasEnemyCapital ? 20 : 0;
   const government = governmentModifier(country.government);
   const religion = religionModifier(country.religion);

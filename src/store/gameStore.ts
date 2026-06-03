@@ -60,6 +60,7 @@ export type WarResult = {
   bet: WarBet | null;
   wonBet: boolean | null;
   turns: CombatTurnOutcome[];
+  formationName?: string | null;
 };
 
 export type GameState = {
@@ -80,6 +81,7 @@ export type GameState = {
   warTurns: Record<string, CombatTurnOutcome[]>;
   completedWarResults: WarResult[];
   countryPlacements: Record<string, number>;
+  suppressedRebelKeys: Record<string, true>;
   campaignPhase: number;
   forcedWars: ActiveWar[];
   rngState: RngState;
@@ -330,7 +332,7 @@ function rebelReligionFor(parent: Country, government: GovernmentType): Religiou
 function rebellionChance(country: Country) {
   if (country.provinces.length < 10) return 0;
   const tier = getCountryTier(country);
-  if (tier === "Empire") return Math.min(35, 18 + country.absorbedGovernments.length * 3);
+  if (tier === "Empire") return Math.min(18, 9 + country.absorbedGovernments.length * 2);
   return 0;
 }
 
@@ -379,6 +381,127 @@ function takeRebelProvinces(country: Country, provinces: Record<string, Province
   });
 
   return bestBlock.length >= Math.min(5, desiredCount) ? bestBlock.slice(0, desiredCount) : [];
+}
+
+function connectedOwnedBlocks(provinceIds: string[], provinces: Record<string, Province>) {
+  const owned = new Set(provinceIds);
+  const visited = new Set<string>();
+  const blocks: string[][] = [];
+
+  provinceIds.forEach(seedId => {
+    if (visited.has(seedId)) return;
+    const block: string[] = [];
+    const queue = [seedId];
+    visited.add(seedId);
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      block.push(currentId);
+      (provinces[currentId]?.adjacentProvinceIds ?? []).forEach(neighborId => {
+        if (owned.has(neighborId) && !visited.has(neighborId)) {
+          visited.add(neighborId);
+          queue.push(neighborId);
+        }
+      });
+    }
+
+    blocks.push(block);
+  });
+
+  return blocks.sort((a, b) => b.length - a.length);
+}
+
+function occupiedHomelandBlocks(country: Country, countries: Record<string, Country>, provinces: Record<string, Province>) {
+  const provinceIdsByOriginal = new Map<string, string[]>();
+  country.provinces.forEach(provinceId => {
+    const originalId = provinces[provinceId]?.initialCountryId;
+    if (!originalId || originalId === country.baseId || originalId === country.id || originalId === "ATA") return;
+    const originalCountry = countries[originalId];
+    if (!originalCountry || originalCountry.isAlive) return;
+    const list = provinceIdsByOriginal.get(originalId) ?? [];
+    list.push(provinceId);
+    provinceIdsByOriginal.set(originalId, list);
+  });
+
+  return Array.from(provinceIdsByOriginal.entries())
+    .map(([originalCountryId, provinceIds]) => {
+      const blocks = connectedOwnedBlocks(provinceIds, provinces);
+      return {
+        originalCountryId,
+        provinceIds: blocks[0] ?? [],
+        share: provinceIds.length / Math.max(1, countries[originalCountryId]?.initialProvinceCount ?? provinceIds.length),
+      };
+    })
+    .filter(candidate => candidate.provinceIds.length >= 5 && candidate.share >= 0.25)
+    .sort((a, b) => b.provinceIds.length - a.provinceIds.length);
+}
+
+function disconnectedEnclaveBlock(country: Country, provinces: Record<string, Province>) {
+  const blocks = connectedOwnedBlocks(country.provinces, provinces);
+  if (blocks.length <= 1) return null;
+  return blocks
+    .slice(1)
+    .filter(block => block.length >= 5)
+    .sort((a, b) => b.length - a.length)[0] ?? null;
+}
+
+function dominantInitialCountryId(provinceIds: string[], provinces: Record<string, Province>) {
+  const counts = new Map<string, number>();
+  provinceIds.forEach(provinceId => {
+    const initialCountryId = provinces[provinceId]?.initialCountryId;
+    if (!initialCountryId || initialCountryId === "ATA") return;
+    counts.set(initialCountryId, (counts.get(initialCountryId) ?? 0) + 1);
+  });
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+function buildBreakawayCountry(args: {
+  id: string;
+  sourceCountry: Country;
+  baseCountry: Country | null;
+  provinceIds: string[];
+  phase: number;
+  name: string;
+  flag: string;
+  government: GovernmentType;
+  religion: ReligiousDenomination;
+}) {
+  const share = args.provinceIds.length / Math.max(1, args.sourceCountry.provinces.length);
+  return {
+    id: args.id,
+    baseId: args.baseCountry?.baseId ?? args.id,
+    name: args.name,
+    flag: args.flag,
+    mapColor: args.baseCountry?.mapColor ?? initialMapColor(args.id),
+    provinces: args.provinceIds,
+    initialProvinceCount: args.baseCountry?.initialProvinceCount ?? args.provinceIds.length,
+    strategicPower: Math.max(10, Math.round((args.baseCountry?.strategicPower ?? args.sourceCountry.strategicPower) * Math.max(0.25, share))),
+    population: Math.round((args.baseCountry?.population ?? args.sourceCountry.population) * Math.max(0.1, share)),
+    area: Math.round((args.baseCountry?.area ?? args.sourceCountry.area) * Math.max(0.1, share)),
+    region: args.baseCountry?.region ?? args.sourceCountry.region,
+    subregion: args.baseCountry?.subregion ?? args.sourceCountry.subregion,
+    absorbedGovernments: [args.government],
+    absorbedCountryIds: [args.baseCountry?.baseId ?? args.id],
+    unlockedFormations: [],
+    largestAbsorbedProvinceCount: 0,
+    campaignPhaseBorn: args.phase,
+    capitalProvinceId: args.provinceIds[0],
+    government: args.government,
+    religion: args.religion,
+    specialModifiers: [
+      {
+        label: "Liberation Front",
+        value: 9,
+        description: "A country-based independence movement fights on familiar terrain.",
+      },
+    ],
+    armyCampsCount: 0,
+    interceptorCharges: 0,
+    blitzActions: 0,
+    disconnectedPhaseCount: 0,
+    eventModifier: 4,
+    isAlive: true,
+  } satisfies Country;
 }
 
 function eventLabel(modifier: number) {
@@ -498,7 +621,7 @@ const REGION_OVERRIDES: Record<string, string> = {
   IDN: "Southeast Asia",
   PHL: "Southeast Asia",
   SGP: "Southeast Asia",
-  EGY: "North Africa",
+  EGY: "Northern Africa",
 };
 
 function continentForCountry(countryId: string, country: Country | undefined, capital: CapitalRecord | null): string {
@@ -600,44 +723,46 @@ function describeCombatTurn(turn: CombatTurnOutcome, countries: Record<string, C
   const active = countries[turn.activeCountryId]?.name ?? turn.activeCountryId;
   const target = countries[turn.targetCountryId]?.name ?? turn.targetCountryId;
   const taken = provinceList(turn.capturedProvinces, provinces);
+  const interceptPrefix = turn.interceptedByCountryId
+    ? `${countries[turn.interceptedByCountryId]?.name ?? turn.interceptedByCountryId} intercepted a +${turn.interceptedRoll ?? 0} conquest roll and forced a re-spin. `
+    : "";
+  const blitzSuffix = typeof turn.blitzRoll === "number" ? ` Blitz action chained a secondary ${turn.blitzRoll > 0 ? "+" : ""}${turn.blitzRoll} roll.` : "";
 
   if (turn.action === "camp") {
-    return `${active} rolled 0 and built an army camp.`;
+    return `${interceptPrefix}${active} rolled 0 and built an army camp for a permanent +25 initiative.${blitzSuffix}`;
   }
 
   if (turn.action === "interceptor") {
-    return `${active} rolled 0 and deployed an interceptor shield around its command network.`;
+    return `${interceptPrefix}${active} rolled 0 and gained 1 interceptor charge.${blitzSuffix}`;
   }
 
   if (turn.action === "support") {
-    return `${active} rolled 0 and rallied public support for +4 event momentum.`;
+    return `${interceptPrefix}${active} rolled 0 and rallied public support, banking 1 blitz action.${blitzSuffix}`;
   }
 
   if (turn.action === "nuke") {
-    return `${active} rolled 0, launched a tactical nuke, fallout rolled ${turn.falloutRoll ?? 0}, and burned ${turn.incineratedProvinceIds.length} province(s): ${taken}.`;
+    return `${interceptPrefix}${active} rolled 0, launched its once-per-war tactical nuke at ${target}'s capital, fallout rolled ${turn.falloutRoll ?? 0}, burned ${turn.incineratedProvinceIds.length} province(s), and inflicted -100 war initiative: ${taken}.${blitzSuffix}`;
   }
 
   if (turn.action === "counter") {
-    return `${active} pressed into ${target}, rolled ${turn.roll}, and counter operations cost it ${turn.capturedProvinces.length} province(s): ${taken}.`;
+    return `${interceptPrefix}${active} pressed into ${target}, rolled ${turn.roll}, and counter operations cost it ${turn.capturedProvinces.length} province(s): ${taken}.${blitzSuffix}`;
   }
 
-  return `${active} attacked ${target}, rolled +${turn.roll}, and captured ${turn.capturedProvinces.length} province(s): ${taken}.`;
+  return `${interceptPrefix}${active} attacked ${target}, rolled +${turn.roll}, and captured ${turn.capturedProvinces.length} province(s): ${taken}.${blitzSuffix}`;
 }
 
 function dominantWarCountry(attacker: Country, defender: Country) {
-  const attackerWheel = countryWheelBreakdown(attacker, attacker.provinces.length, attacker.provinces.includes(defender.capitalProvinceId)).total;
-  const defenderWheel = countryWheelBreakdown(defender, defender.provinces.length, defender.provinces.includes(attacker.capitalProvinceId)).total;
-  const attackerScore = attackerWheel * 2 + attacker.provinces.length * 4 + attacker.strategicPower;
-  const defenderScore = defenderWheel * 2 + defender.provinces.length * 4 + defender.strategicPower;
+  const attackerScore = controlledDevelopmentScore(attacker) * 1.2 + attacker.provinces.length * 8 + attacker.strategicPower * 2;
+  const defenderScore = controlledDevelopmentScore(defender) * 1.2 + defender.provinces.length * 8 + defender.strategicPower * 2;
   return attackerScore >= defenderScore ? attacker.id : defender.id;
 }
 
 function warDominance(attacker: Country, defender: Country) {
-  const attackerWheel = countryWheelBreakdown(attacker, attacker.provinces.length, attacker.provinces.includes(defender.capitalProvinceId)).total;
-  const defenderWheel = countryWheelBreakdown(defender, defender.provinces.length, defender.provinces.includes(attacker.capitalProvinceId)).total;
-  const total = Math.max(1, attackerWheel + defenderWheel);
-  const attackerShare = attackerWheel / total;
-  const defenderShare = defenderWheel / total;
+  const attackerScore = warPowerScore(attacker, defender);
+  const defenderScore = warPowerScore(defender, attacker);
+  const total = Math.max(1, attackerScore + defenderScore);
+  const attackerShare = attackerScore / total;
+  const defenderShare = defenderScore / total;
   return attackerShare >= defenderShare
     ? { countryId: attacker.id, share: attackerShare }
     : { countryId: defender.id, share: defenderShare };
@@ -667,27 +792,97 @@ type TurnResolution = {
   warTurns: Record<string, CombatTurnOutcome[]>;
   completedWarResults: WarResult[];
   countryPlacements: Record<string, number>;
+  suppressedRebelKeys: Record<string, true>;
   stage: CampaignStage;
   logs: string[];
   turn: CombatTurnOutcome;
 };
 
+const LONG_WAR_ANNEXATION_THRESHOLD = 0.68;
+
+function warPowerScore(country: Country, enemy: Country) {
+  const development = controlledDevelopmentScore(country);
+  const territory = country.provinces.length * 7;
+  const capitalPressure = country.provinces.includes(enemy.capitalProvinceId) ? 35 : 0;
+  return development * 1.25 + territory + country.strategicPower * 2 + capitalPressure;
+}
+
+function controlledCountryIdsAtThreshold(
+  country: Country,
+  countries: Record<string, Country>,
+  provinces: Record<string, Province>,
+  threshold = 0.7
+) {
+  const controlledByOrigin = new Map<string, number>();
+  country.provinces.forEach(provinceId => {
+    const initialCountryId = provinces[provinceId]?.initialCountryId;
+    if (!initialCountryId || initialCountryId === "ATA") return;
+    controlledByOrigin.set(initialCountryId, (controlledByOrigin.get(initialCountryId) ?? 0) + 1);
+  });
+
+  return Array.from(controlledByOrigin.entries())
+    .filter(([countryId, count]) => {
+      const originalFootprint = countries[countryId]?.initialProvinceCount ?? 0;
+      return originalFootprint > 0 && count / originalFootprint >= threshold;
+    })
+    .map(([countryId]) => countryId);
+}
+
+function isIndependenceWar(war: ActiveWar) {
+  return war.id.includes("_liberation_") || war.id.includes("_enclave_");
+}
+
+function isRebelWar(war: ActiveWar) {
+  return isIndependenceWar(war) || war.id.includes("_civil_");
+}
+
+function rebelLeadershipSignature(country: Country) {
+  return [
+    country.id,
+    country.name,
+    country.government,
+    country.religion,
+    country.unlockedFormations.join("|"),
+  ].join("::");
+}
+
+function rebelSuppressionKey(overlord: Country, rebelIdentity: string) {
+  return `${rebelLeadershipSignature(overlord)}=>${rebelIdentity}`;
+}
+
+function isRebelSuppressed(suppressedRebelKeys: Record<string, true>, overlord: Country, rebelIdentity: string) {
+  return Boolean(suppressedRebelKeys[rebelSuppressionKey(overlord, rebelIdentity)]);
+}
+
+function reclaimedIndependenceProvinces(winner: Country, loser: Country, provinces: Record<string, Province>) {
+  const homeland = loser.provinces.filter(provinceId => provinces[provinceId]?.initialCountryId === winner.baseId);
+  if (homeland.length > 0) return homeland;
+  return [];
+}
+
 function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): TurnResolution {
   const attacker = { ...state.countries[war.attackerId] };
   const defender = { ...state.countries[war.defenderId] };
   const adjacencyMap: Record<string, string[]> = {};
+  const provinceInitialCountryIds: Record<string, string> = {};
   Object.values(state.provinces).forEach(province => {
     adjacencyMap[province.id] = province.adjacentProvinceIds;
+    provinceInitialCountryIds[province.id] = province.initialCountryId;
   });
 
   const rngState = { ...state.rngState };
-  const turn = resolveCombatTurn(attacker, defender, adjacencyMap, rngState);
+  const activeWar = {
+    ...war,
+    usedNukesByCountryId: { ...(war.usedNukesByCountryId ?? {}) },
+    initiativePenalties: { ...(war.initiativePenalties ?? {}) },
+  };
+  const turn = resolveCombatTurn(attacker, defender, adjacencyMap, rngState, provinceInitialCountryIds, activeWar);
   const countries = {
     ...state.countries,
     [attacker.id]: attacker,
     [defender.id]: defender,
   };
-  let activeWars = state.activeWars;
+  let activeWars = state.activeWars.map(candidate => candidate.id === war.id ? activeWar : candidate);
   let player = state.player;
   let stage: CampaignStage = "Combat";
   let currentBet = state.currentBet;
@@ -698,10 +893,11 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
   };
   let completedWarResults = state.completedWarResults;
   let countryPlacements = state.countryPlacements;
+  let suppressedRebelKeys = state.suppressedRebelKeys;
   let lastCombatOutcome = state.lastCombatOutcome;
   const turnsForWar = warTurns[war.id];
   const dominance = turnsForWar.length >= 150 ? warDominance(countries[war.attackerId], countries[war.defenderId]) : null;
-  const resolvedWinnerId = turn.winnerId ?? (dominance && dominance.share >= 0.85 ? dominance.countryId : null);
+  const resolvedWinnerId = turn.winnerId ?? (dominance && dominance.share >= LONG_WAR_ANNEXATION_THRESHOLD ? dominance.countryId : null);
   const endedByDominance = !turn.winnerId && Boolean(resolvedWinnerId);
   const endedByStalemate = !turn.winnerId && !resolvedWinnerId && Boolean(dominance);
 
@@ -709,6 +905,60 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
 
   if (resolvedWinnerId) {
     const loserId = resolvedWinnerId === attacker.id ? defender.id : attacker.id;
+    const crushedRebelIdentity = isRebelWar(war) && loserId === war.defenderId ? state.countries[war.defenderId]?.baseId ?? war.defenderId : null;
+    const independenceVictory = isIndependenceWar(war) && resolvedWinnerId === defender.id;
+    if (independenceVictory) {
+      const winner = countries[resolvedWinnerId];
+      const loser = countries[loserId];
+      const reclaimed = reclaimedIndependenceProvinces(winner, loser, state.provinces);
+      countries[resolvedWinnerId] = {
+        ...winner,
+        provinces: Array.from(new Set([...winner.provinces, ...reclaimed])),
+        eventModifier: Math.max(winner.eventModifier, winner.eventModifier + 4),
+      };
+      countries[loserId] = {
+        ...loser,
+        provinces: loser.provinces.filter(provinceId => !reclaimed.includes(provinceId)),
+        eventModifier: Math.min(loser.eventModifier, loser.eventModifier - 4),
+      };
+      const activeWarBets = new Map(state.player.activeWarBets);
+      const bet = activeWarBets.get(war.id) ?? null;
+      activeWarBets.delete(war.id);
+      const wonBet = bet ? bet.predictedWinnerId === resolvedWinnerId : null;
+      const nextTickets = bet
+        ? (wonBet ? state.player.tickets + bet.amount * 2 : state.player.tickets - bet.amount)
+        : state.player.tickets;
+      const result: WarResult = {
+        warId: war.id,
+        winnerId: resolvedWinnerId,
+        loserId,
+        bet,
+        wonBet,
+        turns: warTurns[war.id],
+        formationName: null,
+      };
+      completedWarResults = [...state.completedWarResults, result];
+      activeWars = state.activeWars.filter(candidate => candidate.id !== war.id);
+      player = { ...state.player, tickets: Math.max(0, nextTickets), activeWarBets };
+      saveTicketWallet(player.tickets);
+      currentBet = null;
+      selectedWarId = activeWars[0]?.id ?? null;
+      lastCombatOutcome = {
+        attackerId: attacker.id,
+        defenderId: defender.id,
+        winnerId: resolvedWinnerId,
+        rounds: warTurns[war.id].map(round => ({
+          activeCountryId: round.activeCountryId,
+          roll: round.roll,
+          capturedProvinces: round.capturedProvinces,
+        })),
+      };
+      logs.push(`${countries[resolvedWinnerId].name} won its independence war after ${warTurns[war.id].length} rolls and reclaimed ${reclaimed.length} homeland province(s).`);
+      if (bet) {
+        logs.push(wonBet ? `Bet won. Payout: ${bet.amount * 2} tickets.` : `Bet lost. Stake forfeited: ${bet.amount} tickets.`);
+      }
+      stage = activeWars.length > 0 ? "WarSelection" : "CombatResult";
+    } else {
     if (endedByDominance) {
       countries[resolvedWinnerId] = {
         ...countries[resolvedWinnerId],
@@ -721,7 +971,8 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
     const loser = countries[loserId];
     const loserStartingProvinceCount = state.countries[loserId]?.provinces.length ?? loser.provinces.length;
     const inheritedGovernments = Array.from(new Set([...winner.absorbedGovernments, loser.government, ...loser.absorbedGovernments]));
-    const inheritedCountryIds = Array.from(new Set([...winner.absorbedCountryIds, loser.baseId, ...loser.absorbedCountryIds]));
+    const controlledAtThreshold = controlledCountryIdsAtThreshold(winner, countries, state.provinces, 0.7);
+    const inheritedCountryIds = Array.from(new Set([...winner.absorbedCountryIds, loser.baseId, ...loser.absorbedCountryIds, ...controlledAtThreshold]));
     const enforcedReligion = winner.religion;
     const formationResult = applyCountryFormation({
       ...winner,
@@ -737,6 +988,14 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
 
     countries[resolvedWinnerId] = formationResult.country;
     countries[loserId] = { ...loser, isAlive: false, provinces: [] };
+    if (crushedRebelIdentity) {
+      suppressedRebelKeys = {
+        ...suppressedRebelKeys,
+        [rebelSuppressionKey(winner, crushedRebelIdentity)]: true,
+        [rebelSuppressionKey(formationResult.country, crushedRebelIdentity)]: true,
+      };
+      logs.push(`${formationResult.country.name} crushed ${loser.name}; this rebel line will not rise again under the current leadership.`);
+    }
     const aliveAfterElimination = state.campaignScope
       ? state.campaignScope.eligibleCountryIds.filter(countryId => countries[countryId]?.isAlive && countryId !== loserId).length
       : Object.values(countries).filter(country => country.isAlive && country.id !== loserId).length;
@@ -758,6 +1017,7 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
       bet,
       wonBet,
       turns: warTurns[war.id],
+      formationName: formationResult.formationName,
     };
 
     completedWarResults = [...state.completedWarResults, result];
@@ -790,6 +1050,7 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
       }
     }
     stage = activeWars.length > 0 ? "WarSelection" : "CombatResult";
+    }
   } else if (endedByStalemate && dominance) {
     const activeWarBets = new Map(state.player.activeWarBets);
     const bet = activeWarBets.get(war.id) ?? null;
@@ -818,7 +1079,7 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
         capturedProvinces: round.capturedProvinces,
       })),
     };
-    logs.push(`${attacker.name} and ${defender.name} reached a 150-roll border settlement. ${countries[dominance.countryId].name} led at ${Math.round(dominance.share * 100)}%, below the 85% annexation threshold.`);
+    logs.push(`${attacker.name} and ${defender.name} reached a 150-roll border settlement. ${countries[dominance.countryId].name} led at ${Math.round(dominance.share * 100)}%, below the ${Math.round(LONG_WAR_ANNEXATION_THRESHOLD * 100)}% annexation threshold.`);
     if (bet) {
       logs.push(`War bet on ${state.countries[bet.predictedWinnerId]?.name ?? bet.predictedWinnerId} was returned after stalemate.`);
     }
@@ -853,6 +1114,7 @@ function resolveWarTurnState(state: GameState, war: ActiveWar, logs: string[]): 
     warTurns,
     completedWarResults,
     countryPlacements,
+    suppressedRebelKeys,
     stage,
     logs,
     turn,
@@ -898,9 +1160,13 @@ export function getCountryCost(country: Country): number {
 
 export function getCountryTier(country: Country) {
   const development = controlledDevelopmentScore(country);
-  if (development >= 520) return "Hegemon";
+  const absorbedScale = country.absorbedCountryIds.length;
+  const conqueredScale = Math.max(0, country.provinces.length - country.initialProvinceCount);
+  if (development >= 820 && country.provinces.length >= 220 && absorbedScale >= 8) return "Hegemon";
   if (MODERN_EMPIRES.has(country.baseId) && country.campaignPhaseBorn === 0) return "Empire";
-  if (development >= 290 || country.unlockedFormations.length > 0) return "Empire";
+  if (country.unlockedFormations.length > 0 && development >= 360 && country.provinces.length >= 55) return "Empire";
+  if (development >= 520 && country.provinces.length >= 95 && absorbedScale >= 3) return "Empire";
+  if (conqueredScale >= 90 && development >= 470 && absorbedScale >= 2) return "Empire";
   return "Kingdom";
 }
 
@@ -943,6 +1209,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   warTurns: {},
   completedWarResults: [],
   countryPlacements: {},
+  suppressedRebelKeys: {},
   campaignPhase: 0,
   forcedWars: [],
   rngState: newCampaignRng(),
@@ -998,6 +1265,9 @@ export const useGameStore = create<GameState>((set, get) => ({
         religion: religionForCountry(c.id, region, subregion),
         specialModifiers: countrySpecialModifiers(c.id, strategicPower, record?.population ?? 0, record?.area ?? 0),
         armyCampsCount: 0,
+        interceptorCharges: 0,
+        blitzActions: 0,
+        disconnectedPhaseCount: 0,
         eventModifier: 0,
         isAlive: c.id !== "ATA",
       };
@@ -1019,6 +1289,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       warTurns: {},
       completedWarResults: [],
       countryPlacements: {},
+      suppressedRebelKeys: {},
       campaignPhase: 0,
       forcedWars: [],
       rngState,
@@ -1111,25 +1382,118 @@ export const useGameStore = create<GameState>((set, get) => ({
 
       const updatedCountry = countries[countryId];
       const chance = rebellionChance(updatedCountry);
+      const homelandCandidate = occupiedHomelandBlocks(updatedCountry, countries, state.provinces)[0];
+      if (
+        rebelsAllowed &&
+        rebellionsThisHorizon < 3 &&
+        homelandCandidate &&
+        !isRebelSuppressed(state.suppressedRebelKeys, updatedCountry, homelandCandidate.originalCountryId) &&
+        nextInt(rngState, 1, 100) <= 22
+      ) {
+        const baseCountry = countries[homelandCandidate.originalCountryId];
+        const rebelId = homelandCandidate.originalCountryId;
+        const rebelProvinceIds = homelandCandidate.provinceIds;
+        const rebelCountry = buildBreakawayCountry({
+          id: rebelId,
+          sourceCountry: updatedCountry,
+          baseCountry,
+          provinceIds: rebelProvinceIds,
+          phase: state.campaignPhase,
+          name: baseCountry?.name ?? `${updatedCountry.subregion} Liberation Front`,
+          flag: baseCountry?.flag ?? "⚑",
+          government: baseCountry?.government ?? rebelGovernmentFor(updatedCountry),
+          religion: baseCountry?.religion ?? rebelReligionFor(updatedCountry, rebelGovernmentFor(updatedCountry)),
+        });
+
+        countries[countryId] = {
+          ...updatedCountry,
+          provinces: updatedCountry.provinces.filter(provinceId => !rebelProvinceIds.includes(provinceId)),
+          eventModifier: Math.min(updatedCountry.eventModifier, updatedCountry.eventModifier - 4),
+        };
+        countries[rebelId] = rebelCountry;
+        rebelCountryIds.push(rebelId);
+        forcedWars.push({
+          id: `${countryId}_liberation_${rebelId}_${state.campaignPhase}`,
+          attackerId: countryId,
+          defenderId: rebelId,
+          attackerOccupiedCapital: false,
+          defenderOccupiedCapital: false,
+          incineratedProvinceIds: [],
+        });
+        rebellionsThisHorizon += 1;
+        logs.push(`${rebelCountry.name} declared independence from ${updatedCountry.name}, reclaiming ${rebelProvinceIds.length} homeland province(s).`);
+        return;
+      }
+
+      const enclaveBlock = disconnectedEnclaveBlock(updatedCountry, state.provinces);
+      const disconnectedPhaseCount = enclaveBlock ? updatedCountry.disconnectedPhaseCount + 1 : 0;
+      countries[countryId] = { ...countries[countryId], disconnectedPhaseCount };
+      if (rebelsAllowed && rebellionsThisHorizon < 3 && enclaveBlock && disconnectedPhaseCount >= 3) {
+        const dominantCountryId = dominantInitialCountryId(enclaveBlock, state.provinces);
+        const baseCountry = dominantCountryId ? countries[dominantCountryId] : null;
+        const baseAvailable = baseCountry && !baseCountry.isAlive;
+        const rebelId = baseAvailable ? baseCountry.id : `ENC_${countryId}_${state.campaignPhase}_${rebelCountryIds.length}`;
+        const rebelIdentity = baseAvailable ? baseCountry.baseId : `enclave:${dominantCountryId ?? updatedCountry.subregion}`;
+        if (!isRebelSuppressed(state.suppressedRebelKeys, updatedCountry, rebelIdentity) && nextInt(rngState, 1, 100) <= 20) {
+        const rebelGovernment = baseCountry?.government ?? rebelGovernmentFor(updatedCountry);
+        const rebelReligion = baseCountry?.religion ?? rebelReligionFor(updatedCountry, rebelGovernment);
+        const rebelCountry = buildBreakawayCountry({
+          id: rebelId,
+          sourceCountry: updatedCountry,
+          baseCountry: baseAvailable ? baseCountry : null,
+          provinceIds: enclaveBlock,
+          phase: state.campaignPhase,
+          name: baseAvailable ? baseCountry.name : `${updatedCountry.subregion} Free State`,
+          flag: baseAvailable ? baseCountry.flag : "⚑",
+          government: rebelGovernment,
+          religion: rebelReligion,
+        });
+
+        const currentCountry = countries[countryId];
+        countries[countryId] = {
+          ...currentCountry,
+          provinces: currentCountry.provinces.filter(provinceId => !enclaveBlock.includes(provinceId)),
+          disconnectedPhaseCount: 0,
+          eventModifier: Math.min(currentCountry.eventModifier, currentCountry.eventModifier - 3),
+        };
+        countries[rebelId] = rebelCountry;
+        rebelCountryIds.push(rebelId);
+        forcedWars.push({
+          id: `${countryId}_enclave_${rebelId}_${state.campaignPhase}`,
+          attackerId: countryId,
+          defenderId: rebelId,
+          attackerOccupiedCapital: false,
+          defenderOccupiedCapital: false,
+          incineratedProvinceIds: [],
+        });
+        rebellionsThisHorizon += 1;
+        logs.push(`${rebelCountry.name} seceded from an isolated ${updatedCountry.name} enclave after ${disconnectedPhaseCount} disconnected phase(s).`);
+          return;
+        }
+      }
+
+      const currentCountry = countries[countryId];
       if (rebelsAllowed && rebellionsThisHorizon < 3 && chance > 0 && nextInt(rngState, 1, 100) <= chance) {
-        const rebelProvinceIds = takeRebelProvinces(updatedCountry, state.provinces, rngState);
-        if (rebelProvinceIds.length > 0 && rebelProvinceIds.length < updatedCountry.provinces.length) {
+        const rebelProvinceIds = takeRebelProvinces(currentCountry, state.provinces, rngState);
+        if (rebelProvinceIds.length > 0 && rebelProvinceIds.length < currentCountry.provinces.length) {
+          const rebelGovernment = rebelGovernmentFor(currentCountry);
+          const rebelReligion = rebelReligionFor(currentCountry, rebelGovernment);
+          const rebelIdentity = `civil:${rebelGovernment}:${rebelReligion}`;
+          if (isRebelSuppressed(state.suppressedRebelKeys, currentCountry, rebelIdentity)) return;
           const rebelId = `REB_${countryId}_${state.logs.length}_${rebelCountryIds.length}`;
-          const rebelGovernment = rebelGovernmentFor(updatedCountry);
-          const rebelReligion = rebelReligionFor(updatedCountry, rebelGovernment);
           const rebelCountry: Country = {
             id: rebelId,
-            baseId: rebelId,
-            name: rebelName(updatedCountry, rebelGovernment),
+            baseId: rebelIdentity,
+            name: rebelName(currentCountry, rebelGovernment),
             flag: "⚑",
             mapColor: initialMapColor(rebelId),
             provinces: rebelProvinceIds,
             initialProvinceCount: rebelProvinceIds.length,
-            strategicPower: rebelPowerFor(updatedCountry, rebelProvinceIds.length),
-            population: Math.round(updatedCountry.population * (rebelProvinceIds.length / Math.max(1, updatedCountry.provinces.length))),
-            area: Math.round(updatedCountry.area * (rebelProvinceIds.length / Math.max(1, updatedCountry.provinces.length))),
-            region: updatedCountry.region,
-            subregion: updatedCountry.subregion,
+            strategicPower: rebelPowerFor(currentCountry, rebelProvinceIds.length),
+            population: Math.round(currentCountry.population * (rebelProvinceIds.length / Math.max(1, currentCountry.provinces.length))),
+            area: Math.round(currentCountry.area * (rebelProvinceIds.length / Math.max(1, currentCountry.provinces.length))),
+            region: currentCountry.region,
+            subregion: currentCountry.subregion,
             absorbedGovernments: [rebelGovernment],
             absorbedCountryIds: [rebelId],
             unlockedFormations: [],
@@ -1146,14 +1510,17 @@ export const useGameStore = create<GameState>((set, get) => ({
               },
             ],
             armyCampsCount: 0,
+            interceptorCharges: 0,
+            blitzActions: 0,
+            disconnectedPhaseCount: 0,
             eventModifier: nextInt(rngState, 2, 8),
             isAlive: true,
           };
 
           countries[countryId] = {
-            ...updatedCountry,
-            provinces: updatedCountry.provinces.filter(provinceId => !rebelProvinceIds.includes(provinceId)),
-            eventModifier: Math.min(updatedCountry.eventModifier, updatedCountry.eventModifier - 3),
+            ...currentCountry,
+            provinces: currentCountry.provinces.filter(provinceId => !rebelProvinceIds.includes(provinceId)),
+            eventModifier: Math.min(currentCountry.eventModifier, currentCountry.eventModifier - 3),
           };
           countries[rebelId] = rebelCountry;
           rebelCountryIds.push(rebelId);
@@ -1166,7 +1533,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             incineratedProvinceIds: [],
           });
           rebellionsThisHorizon += 1;
-          logs.push(`${rebelCountry.name} broke away from ${updatedCountry.name}, seizing ${rebelProvinceIds.length} province(s). Civil war is locked in.`);
+          logs.push(`${rebelCountry.name} broke away from ${currentCountry.name}, seizing ${rebelProvinceIds.length} province(s). Civil war is locked in.`);
         }
       }
     });
@@ -1220,7 +1587,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       set({
         activeWars: [],
         selectedWarId: null,
-        stage: winnerId === state.player.campaignFavoriteCountryId ? "CampaignWon" : "GameOver",
+        stage: rank <= 3 ? "CampaignWon" : "GameOver",
         player: {
           ...state.player,
           tickets: nextTickets,
@@ -1334,6 +1701,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         warTurns: resolution.warTurns,
         completedWarResults: resolution.completedWarResults,
         countryPlacements: resolution.countryPlacements,
+        suppressedRebelKeys: resolution.suppressedRebelKeys,
         stage: resolution.stage,
         logs: finalLogs,
         isResolvingTurn: false,
@@ -1363,6 +1731,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         warTurns: resolution.warTurns,
         completedWarResults: resolution.completedWarResults,
         countryPlacements: resolution.countryPlacements,
+        suppressedRebelKeys: resolution.suppressedRebelKeys,
         stage: resolution.stage,
         logs: resolution.logs,
         isResolvingTurn: false,
@@ -1406,6 +1775,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         warTurns: resolution.warTurns,
         completedWarResults: resolution.completedWarResults,
         countryPlacements: resolution.countryPlacements,
+        suppressedRebelKeys: resolution.suppressedRebelKeys,
         stage: resolution.stage,
         logs: resolution.logs,
       };
@@ -1433,6 +1803,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       warTurns: resolution.warTurns,
       completedWarResults: resolution.completedWarResults,
       countryPlacements: resolution.countryPlacements,
+      suppressedRebelKeys: resolution.suppressedRebelKeys,
       stage: resolution.stage,
       logs: finalLogs,
       isResolvingTurn: false,
@@ -1446,31 +1817,87 @@ export const useGameStore = create<GameState>((set, get) => ({
       stage: "Combat",
       selectedWarId: start.selectedWarId ?? start.activeWars[0].id,
       isResolvingTurn: true,
+      isAutoPlaying: true,
       logs: [...start.logs, `War sweep started: resolving ${start.activeWars.length} war(s).`],
     });
 
-    let guard = 150 * Math.max(1, start.activeWars.length) + 40;
+    let guard = 220 * Math.max(1, start.activeWars.length) + 80;
     const step = () => {
       const state = get();
       if (state.activeWars.length === 0 || state.stage === "GameOver" || state.stage === "CampaignWon" || guard <= 0) {
         if (guard <= 0) {
-          set({ logs: [...state.logs, "War sweep stopped by emergency guard. Remaining wars need manual review."], isResolvingTurn: false });
+          set({ logs: [...state.logs, "War sweep stopped by emergency guard. Remaining wars need manual review."], isResolvingTurn: false, isAutoPlaying: false });
         } else {
-          set({ isResolvingTurn: false });
+          set({ isResolvingTurn: false, isAutoPlaying: false });
         }
+        return;
+      }
+      if (!state.isAutoPlaying) {
+        window.setTimeout(step, 160);
         return;
       }
       if (!state.selectedWarId || !state.activeWars.some(war => war.id === state.selectedWarId)) {
         set({ selectedWarId: state.activeWars[0].id, stage: "Combat" });
       }
       const current = get();
-      const war = current.activeWars.find(candidate => candidate.id === current.selectedWarId);
-      if (!war) {
+      const firstWar = current.activeWars.find(candidate => candidate.id === current.selectedWarId) ?? current.activeWars[0];
+      if (!firstWar) {
         set({ isResolvingTurn: false });
         return;
       }
-      const resolution = resolveWarTurnState(current, war, [...current.logs]);
-      const warEnded = !resolution.activeWars.some(candidate => candidate.id === war.id);
+      const speed = current.autoSpeed;
+      const turnsPerStep = speed >= 4 ? 40 : speed >= 2 ? 12 : 1;
+      const delay = speed >= 4 ? 520 : speed >= 2 ? 760 : 1050;
+      const logStart = current.logs.length;
+      const workingLogs = [...current.logs];
+      let workingState = current;
+      let resolution: TurnResolution | null = null;
+      let turnsResolved = 0;
+
+      while (turnsResolved < turnsPerStep && guard > 0) {
+        const war = workingState.activeWars.find(candidate => candidate.id === firstWar.id);
+        if (!war || workingState.stage === "GameOver" || workingState.stage === "CampaignWon") break;
+        resolution = resolveWarTurnState(workingState, war, workingLogs);
+        turnsResolved += 1;
+        guard -= 1;
+        workingState = {
+          ...workingState,
+          countries: resolution.countries,
+          provinces: resolution.provinces,
+          rngState: resolution.rngState,
+          activeWars: resolution.activeWars,
+          selectedWarId: resolution.selectedWarId,
+          currentBet: resolution.currentBet,
+          lastCombatOutcome: resolution.lastCombatOutcome,
+          player: resolution.player,
+          warTurns: resolution.warTurns,
+          completedWarResults: resolution.completedWarResults,
+          countryPlacements: resolution.countryPlacements,
+          suppressedRebelKeys: resolution.suppressedRebelKeys,
+          stage: resolution.stage,
+          logs: resolution.logs,
+        };
+        if (!resolution.activeWars.some(candidate => candidate.id === firstWar.id)) break;
+      }
+
+      if (!resolution) {
+        set({ isResolvingTurn: false });
+        return;
+      }
+      const warEnded = !resolution.activeWars.some(candidate => candidate.id === firstWar.id);
+      const newLogs = resolution.logs.slice(logStart);
+      const terminalLogs = newLogs.filter(log => /won the war|border settlement|Bet won|Bet lost|returned|proclaimed|enforced|survived/i.test(log));
+      const latestTurns = resolution.warTurns[firstWar.id] ?? [];
+      const capturedCount = latestTurns.slice(-turnsResolved).reduce((total, turn) => total + turn.capturedProvinces.length, 0);
+      const attackerName = current.countries[firstWar.attackerId]?.name ?? firstWar.attackerId;
+      const defenderName = current.countries[firstWar.defenderId]?.name ?? firstWar.defenderId;
+      const logs = turnsResolved > 1
+        ? [
+          ...current.logs,
+          `Auto sweep ${speed}x resolved ${turnsResolved} roll(s) in ${attackerName} vs ${defenderName}${capturedCount > 0 ? ` and shifted ${capturedCount} province(s)` : ""}.`,
+          ...terminalLogs,
+        ]
+        : resolution.logs;
       set({
         countries: resolution.countries,
         provinces: resolution.provinces,
@@ -1483,12 +1910,12 @@ export const useGameStore = create<GameState>((set, get) => ({
         warTurns: resolution.warTurns,
         completedWarResults: resolution.completedWarResults,
         countryPlacements: resolution.countryPlacements,
+        suppressedRebelKeys: resolution.suppressedRebelKeys,
         stage: resolution.stage,
-        logs: resolution.logs,
+        logs,
         isResolvingTurn: true,
       });
-      guard -= 1;
-      window.setTimeout(step, warEnded ? 950 : 90);
+      window.setTimeout(step, warEnded ? 950 : delay);
     };
     window.setTimeout(step, 120);
   },
@@ -1522,7 +1949,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       const nextTickets = state.player.tickets + payout;
       saveTicketWallet(nextTickets);
       set({
-        stage: winnerId === state.player.campaignFavoriteCountryId ? "CampaignWon" : "GameOver",
+        stage: rank <= 3 ? "CampaignWon" : "GameOver",
         player: {
           ...state.player,
           tickets: nextTickets,

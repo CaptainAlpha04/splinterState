@@ -43,6 +43,9 @@ export type Country = {
   religion: ReligiousDenomination;
   specialModifiers: CountryModifier[];
   armyCampsCount: number;
+  interceptorCharges: number;
+  blitzActions: number;
+  disconnectedPhaseCount: number;
   eventModifier: number;
   isAlive: boolean;
 };
