@@ -247,7 +247,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     const country = state.countries[countryId];
     if (!country || !state.campaignScope?.eligibleCountryIds.includes(countryId)) return;
 
-    const cost = countryCost(country);
+    const isContinuingStory = state.isStoryMode && state.campaignPhase > 1;
+    const cost = isContinuingStory ? 0 : countryCost(country);
     if (cost > state.player.tickets) {
       set({ logs: [...state.logs, `${country.name} costs ${cost} tickets. Wallet: ${state.player.tickets}.`] });
       return;
@@ -924,7 +925,29 @@ export const useGameStore = create<GameState>((set, get) => ({
       return;
     }
 
-    const { provinces: cleanedProvinces, countries: cleanedCountries, logs: falloutLogs } = cleanNuclearFallout(state.provinces, state.countries);
+    const { provinces: cleanedProvinces, countries: cleanedCountries, logs: falloutLogs } = cleanNuclearFallout(state.provinces, state.countries, state.completedWarResults);
+
+    const favoriteId = state.player.campaignFavoriteCountryId;
+    const favorite = favoriteId ? cleanedCountries[favoriteId] : null;
+    const favoriteFell = favoriteId && (!favorite || !favorite.isAlive);
+
+    if (state.isStoryMode && favoriteFell) {
+      set({
+        provinces: cleanedProvinces,
+        countries: cleanedCountries,
+        stage: "GameOver",
+        player: {
+          ...state.player,
+          campaignStake: 0,
+        },
+        logs: [
+          ...state.logs,
+          ...falloutLogs,
+          `💀 DEFEAT: ${favorite?.flag} ${favorite?.name} has fallen!`,
+        ],
+      });
+      return;
+    }
 
     const aliveInScope = state.campaignScope
       ? state.campaignScope.eligibleCountryIds.filter(countryId => cleanedCountries[countryId]?.isAlive)

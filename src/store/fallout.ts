@@ -1,9 +1,11 @@
 import type { Country } from "../engine/models/country";
 import type { Province } from "../engine/models/province";
+import type { WarResult } from "./types";
 
 export function cleanNuclearFallout(
   provinces: Record<string, Province>,
-  countries: Record<string, Country>
+  countries: Record<string, Country>,
+  completedWarResults?: WarResult[]
 ): { provinces: Record<string, Province>; countries: Record<string, Country>; logs: string[] } {
   const nextProvinces = { ...provinces };
   const nextCountries = { ...countries };
@@ -23,6 +25,10 @@ export function cleanNuclearFallout(
   incineratedIds.forEach(provId => {
     const province = nextProvinces[provId];
     const previousOwnerId = province.ownerId;
+    const prevCountry = previousOwnerId ? nextCountries[previousOwnerId] : null;
+
+    // Check if the previous owner is dead/eliminated (has no provinces besides the incinerated ones)
+    const isPrevEliminated = prevCountry ? (!prevCountry.isAlive || prevCountry.provinces.length === 0) : true;
 
     const neighborCounts: Record<string, number> = {};
     province.adjacentProvinceIds.forEach(adjId => {
@@ -35,19 +41,32 @@ export function cleanNuclearFallout(
       }
     });
 
+    let conquerorId: string | null = null;
+    if (previousOwnerId && completedWarResults) {
+      const result = completedWarResults.find(r => r.loserId === previousOwnerId);
+      if (result && result.winnerId) {
+        conquerorId = result.winnerId;
+      }
+    }
+
     let newOwnerId = previousOwnerId;
     const candidates = Object.entries(neighborCounts);
 
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => {
-        const countDiff = b[1] - a[1];
-        if (countDiff !== 0) return countDiff;
-        const powerA = nextCountries[a[0]]?.strategicPower ?? 0;
-        const powerB = nextCountries[b[0]]?.strategicPower ?? 0;
-        return powerB - powerA;
-      });
-
-      newOwnerId = candidates[0][0];
+    if (isPrevEliminated) {
+      if (conquerorId && nextCountries[conquerorId]?.isAlive) {
+        newOwnerId = conquerorId;
+      } else if (candidates.length > 0) {
+        candidates.sort((a, b) => {
+          const countDiff = b[1] - a[1];
+          if (countDiff !== 0) return countDiff;
+          const powerA = nextCountries[a[0]]?.strategicPower ?? 0;
+          const powerB = nextCountries[b[0]]?.strategicPower ?? 0;
+          return powerB - powerA;
+        });
+        newOwnerId = candidates[0][0];
+      }
+    } else {
+      newOwnerId = previousOwnerId;
     }
 
     nextProvinces[provId] = {
@@ -77,10 +96,12 @@ export function cleanNuclearFallout(
 
   Object.keys(countryProvinces).forEach(cId => {
     if (nextCountries[cId]) {
+      const wasAlive = nextCountries[cId].isAlive;
+      const hasProvinces = countryProvinces[cId].length > 0;
       nextCountries[cId] = {
         ...nextCountries[cId],
         provinces: countryProvinces[cId],
-        isAlive: cId === "ATA" ? false : countryProvinces[cId].length > 0,
+        isAlive: cId === "ATA" ? false : (wasAlive && hasProvinces),
       };
     }
   });
