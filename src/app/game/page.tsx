@@ -30,6 +30,7 @@ export default function GamePage() {
   const logs = useGameStore(state => state.logs);
   const setCampaignScale = useGameStore(state => state.setCampaignScale);
   const resetCampaign = useGameStore(state => state.resetCampaign);
+  const continueCampaignWithNewFavorite = useGameStore(state => state.continueCampaignWithNewFavorite);
   const isResolvingTurn = useGameStore(state => state.isResolvingTurn);
   const isAutoPlaying = useGameStore(state => state.isAutoPlaying);
   const autoSpeed = useGameStore(state => state.autoSpeed);
@@ -284,6 +285,8 @@ export default function GamePage() {
           wars={completedWarResults.length}
           onRestart={resetCampaign}
           isMobile={isMobile}
+          isStoryMode={isStoryMode}
+          onContinueWithNewFavorite={continueCampaignWithNewFavorite}
         />
       ) : null}
 

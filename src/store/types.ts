@@ -112,4 +112,5 @@ export type GameState = {
   focusCountry: (countryId: string | null) => void;
   resetCampaign: () => void;
   resolveManualWarPairing: (targetCountryId: string | null) => void;
+  continueCampaignWithNewFavorite: () => void;
 };

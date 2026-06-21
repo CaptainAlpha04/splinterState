@@ -254,7 +254,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
 
     const isStory = state.isStoryMode;
-    const buildScale = isStory ? "Regional War" : state.campaignScope.scale;
+    const buildScale = isStory ? (state.storyModeScale || "Regional War") : state.campaignScope.scale;
     const campaignScope = buildScope(buildScale, countryId, state.countries, state.capitals);
     const nextTickets = state.player.tickets - cost;
     saveTicketWallet(nextTickets);
@@ -1063,5 +1063,19 @@ export const useGameStore = create<GameState>((set, get) => ({
       });
     }
     get().generateWars();
+  },
+
+  continueCampaignWithNewFavorite: () => {
+    const state = get();
+    set({
+      stage: "PickFavorite",
+      player: {
+        ...state.player,
+        campaignFavoriteCountryId: null,
+        campaignStake: 0,
+      },
+      selectedCountryId: null,
+      logs: [...state.logs, "Campaign continued: Select a new favorite country from the remaining alive powers."],
+    });
   },
 }));

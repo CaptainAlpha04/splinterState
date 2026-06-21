@@ -24,41 +24,49 @@ export function runMatchmaking(
 ): MatchmakingResult {
   const newWars: ActiveWar[] = [];
   
-  const busyCountryIds = new Set<string>();
+  const usedAttackerIds = new Set<string>();
   activeWars.forEach(w => {
-    busyCountryIds.add(w.attackerId);
-    busyCountryIds.add(w.defenderId);
+    usedAttackerIds.add(w.attackerId);
   });
 
-  const availableCountries = Object.values(countries).filter(c => c.isAlive && !busyCountryIds.has(c.id));
-  const ownerByProvinceId = new Map<string, string>();
+  const potentialAttackers = Object.values(countries).filter(c => 
+    c.isAlive && 
+    !usedAttackerIds.has(c.id) && 
+    !(skipAttackerIds && skipAttackerIds.has(c.id))
+  );
 
+  const ownerByProvinceId = new Map<string, string>();
   Object.values(countries).forEach(country => {
     if (!country.isAlive) return;
     country.provinces.forEach(provinceId => ownerByProvinceId.set(provinceId, country.id));
   });
   
-  // Shuffle available countries
-  for (let i = availableCountries.length - 1; i > 0; i--) {
+  // Shuffle potential attackers
+  for (let i = potentialAttackers.length - 1; i > 0; i--) {
     const j = nextInt(rngState, 0, i);
-    [availableCountries[i], availableCountries[j]] = [availableCountries[j], availableCountries[i]];
+    [potentialAttackers[i], potentialAttackers[j]] = [potentialAttackers[j], potentialAttackers[i]];
   }
 
   const landNeighborIdsByCountry = new Map<string, Set<string>>();
-  availableCountries.forEach(country => {
-    landNeighborIdsByCountry.set(country.id, collectLandNeighbors(country, countries, provinces, ownerByProvinceId));
+  Object.values(countries).forEach(country => {
+    if (country.isAlive) {
+      landNeighborIdsByCountry.set(country.id, collectLandNeighbors(country, countries, provinces, ownerByProvinceId));
+    }
   });
 
-  for (const attacker of availableCountries) {
+  const allAliveCountries = Object.values(countries).filter(c => c.isAlive);
+
+  for (const attacker of potentialAttackers) {
     if (newWars.length + activeWars.length >= maxWars) break;
-    if (busyCountryIds.has(attacker.id)) continue;
-    if (skipAttackerIds && skipAttackerIds.has(attacker.id)) continue;
 
     const neighborCountryIds = landNeighborIdsByCountry.get(attacker.id) ?? new Set<string>();
+    const neighbors = Array.from(neighborCountryIds).filter(countryId => {
+      const c = countries[countryId];
+      return c && c.isAlive;
+    });
 
-    const neighbors = Array.from(neighborCountryIds).filter(countryId => !busyCountryIds.has(countryId));
     const navalTargets = neighbors.length === 0
-      ? nearbyNavalTargets(attacker, availableCountries, capitals, landNeighborIdsByCountry, busyCountryIds)
+      ? nearbyNavalTargets(attacker, allAliveCountries, capitals, landNeighborIdsByCountry)
       : [];
     const targetPool = neighbors.length > 0 ? neighbors : navalTargets;
 
@@ -66,7 +74,7 @@ export function runMatchmaking(
       const targetId = targetPool[nextInt(rngState, 0, targetPool.length - 1)];
       const defender = countries[targetId];
 
-      if (defender && !busyCountryIds.has(defender.id)) {
+      if (defender && defender.isAlive) {
         newWars.push({
           id: `${attacker.id}_vs_${defender.id}_${Date.now()}`,
           attackerId: attacker.id,
@@ -76,8 +84,7 @@ export function runMatchmaking(
           incineratedProvinceIds: []
         });
 
-        busyCountryIds.add(attacker.id);
-        busyCountryIds.add(defender.id);
+        usedAttackerIds.add(attacker.id);
       }
     }
   }
@@ -112,8 +119,7 @@ function nearbyNavalTargets(
   attacker: Country,
   availableCountries: Country[],
   capitals: MatchmakingCapital[],
-  landNeighborIdsByCountry: Map<string, Set<string>>,
-  busyCountryIds: Set<string>
+  landNeighborIdsByCountry: Map<string, Set<string>>
 ) {
   const attackerCapital = capitals.find(capital => capital.countryId === attacker.id);
   if (!attackerCapital) return [];
@@ -122,7 +128,7 @@ function nearbyNavalTargets(
   if (!attackerIsIsolated) return [];
 
   const candidates = availableCountries
-    .filter(country => country.id !== attacker.id && !busyCountryIds.has(country.id))
+    .filter(country => country.id !== attacker.id)
     .map(country => {
       const targetCapital = capitals.find(capital => capital.countryId === country.id);
       return {

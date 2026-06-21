@@ -778,6 +778,24 @@ export function resolveWarTurnState(state: GameState, war: ActiveWar, logs: stri
 
       completedWarResults = [...state.completedWarResults, result];
       activeWars = state.activeWars.filter(candidate => candidate.id !== war.id);
+      activeWars = activeWars
+        .map(w => {
+          if (w.defenderId === loserId) {
+            logs.push(`⚠️ Target shift: Since ${loser.name} was eliminated, ${countries[w.attackerId]?.name || w.attackerId} now targets ${countries[resolvedWinnerId]?.name || resolvedWinnerId} (who absorbed them).`);
+            return {
+              ...w,
+              defenderId: resolvedWinnerId,
+            };
+          }
+          return w;
+        })
+        .filter(w => {
+          const attackerAlive = countries[w.attackerId]?.isAlive;
+          if (!attackerAlive) {
+            logs.push(`⚠️ War cancelled: ${countries[w.attackerId]?.name || w.attackerId} was eliminated, cancelling their attack on ${countries[w.defenderId]?.name || w.defenderId}.`);
+          }
+          return attackerAlive;
+        });
       player = { ...state.player, tickets: Math.max(0, nextTickets), activeWarBets };
       saveTicketWallet(player.tickets);
       currentBet = null;

@@ -139,6 +139,8 @@ export function EndScene({
   wars,
   onRestart,
   isMobile,
+  isStoryMode = false,
+  onContinueWithNewFavorite,
 }: {
   won: boolean;
   favoriteId: string | null;
@@ -150,6 +152,8 @@ export function EndScene({
   wars: number;
   onRestart: () => void;
   isMobile: boolean;
+  isStoryMode?: boolean;
+  onContinueWithNewFavorite?: () => void;
 }) {
   const winner = leaderboard[0];
 
@@ -253,9 +257,25 @@ export function EndScene({
             </div>
           </section>
         </div>
-        <button type="button" onClick={onRestart} style={endRestartButtonStyle}>
-          New Campaign
-        </button>
+        <div style={{ display: "grid", gridTemplateColumns: isStoryMode && !won ? "1fr 1fr" : "1fr", gap: 12 }}>
+          {isStoryMode && !won && onContinueWithNewFavorite ? (
+            <button
+              type="button"
+              onClick={onContinueWithNewFavorite}
+              style={{
+                ...endRestartButtonStyle,
+                background: "linear-gradient(180deg, #9d6f30, #583912)",
+                borderColor: "#d6ad63",
+                color: "#fff1cf",
+              }}
+            >
+              Continue with New Favorite
+            </button>
+          ) : null}
+          <button type="button" onClick={onRestart} style={endRestartButtonStyle}>
+            New Campaign
+          </button>
+        </div>
       </section>
     </div>
   );
