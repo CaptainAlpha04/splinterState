@@ -9,6 +9,7 @@ import {
   getCountryDevelopmentScore,
   getCountryReligionModifier,
   getCountryTier,
+  getValidTargetsForCountry,
   type CampaignScale,
   useGameStore,
 } from "../../store/gameStore";
@@ -26,6 +27,7 @@ export default function Sidebar({
   isMobile: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [controlMode, setControlMode] = useState<"auto" | "manual">("auto");
 
   const isLoaded = useGameStore(state => state.isLoaded);
   const stage = useGameStore(state => state.stage);
@@ -48,6 +50,10 @@ export default function Sidebar({
   const skipAllWars = useGameStore(state => state.skipAllWars);
   const continueAfterWar = useGameStore(state => state.continueAfterWar);
   const resetCampaign = useGameStore(state => state.resetCampaign);
+  const resolveManualWarPairing = useGameStore(state => state.resolveManualWarPairing);
+  const playerControlMode = useGameStore(state => state.playerControlMode);
+  const manualControlAttackSkipped = useGameStore(state => state.manualControlAttackSkipped);
+  const capitals = useGameStore(state => state.capitals);
 
   const selectedProvince = selectedProvinceId ? provinces[selectedProvinceId] : null;
   const selectedCountry = selectedCountryId ? countries[selectedCountryId] : null;
@@ -64,6 +70,7 @@ export default function Sidebar({
       case "PickScope": return "Campaign Scale";
       case "PickFavorite": return "Campaign Favorite";
       case "EventHorizon": return "Event Horizon";
+      case "ManualWarPairing": return "Manual Targeting";
       case "WarSelection": return "War Room";
       case "Betting": return "Wager Phase";
       case "Combat": return "Live Combat";
@@ -201,10 +208,38 @@ export default function Sidebar({
                     <span>Favorite buy-in</span>
                     <strong>{countryCost} tickets</strong>
                   </div>
+
+                  <div style={{ display: "grid", gap: 6, margin: "12px 0 16px" }}>
+                    <span style={{ fontSize: 11, color: "#a8b3c2", fontWeight: "bold", textTransform: "uppercase", letterSpacing: 0.5 }}>Control Mode</span>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <button
+                        key="auto-mode"
+                        type="button"
+                        onClick={() => setControlMode("auto")}
+                        style={controlMode === "auto" ? activeModeButtonStyle : modeButtonStyle}
+                      >
+                        🤖 Auto Mode
+                      </button>
+                      <button
+                        key="manual-mode"
+                        type="button"
+                        onClick={() => setControlMode("manual")}
+                        style={controlMode === "manual" ? activeModeButtonStyle : modeButtonStyle}
+                      >
+                        🎮 Manual Control
+                      </button>
+                    </div>
+                    <p style={{ ...copyStyle, fontSize: 11.5, margin: "4px 0 0", opacity: 0.8 }}>
+                      {controlMode === "auto" 
+                        ? "Spectator mode: matches resolve automatically. You only place bets." 
+                        : "Playable mode: pick target countries to attack in each phase, or skip to defend."}
+                    </p>
+                  </div>
+
                   <button
                     type="button"
                     disabled={!canBuySelected}
-                    onClick={() => chooseFavorite(selectedCountry.id)}
+                    onClick={() => chooseFavorite(selectedCountry.id, controlMode)}
                     style={canBuySelected ? primaryButtonStyle : disabledButtonStyle}
                   >
                     Buy Favorite
@@ -215,6 +250,91 @@ export default function Sidebar({
                 <p style={copyStyle}>Click a country on the map to inspect its price and pick your campaign favorite.</p>
               )}
             </Panel>
+          ) : null}
+
+          {stage === "ManualWarPairing" ? (
+            (() => {
+              const favoriteId = player.campaignFavoriteCountryId;
+              const favorite = favoriteId ? countries[favoriteId] : null;
+              const validTargets = favoriteId && campaignScope
+                ? getValidTargetsForCountry(
+                    favoriteId,
+                    countries,
+                    provinces,
+                    campaignScope.eligibleCountryIds,
+                    capitals
+                  ).map(id => countries[id]).filter(Boolean)
+                : [];
+              return (
+                <Panel>
+                  <p style={copyStyle}>
+                    <strong>{favorite?.flag} {favorite?.name}</strong>: Manual Targeting Phase. Select a neighboring country inside the campaign scope to attack this phase, or skip to defend.
+                  </p>
+
+                  {selectedCountry && selectedCountry.id !== favoriteId ? (
+                    <div style={{ marginTop: 10, padding: 8, border: "1px solid rgba(210,165,82,0.3)", borderRadius: 4, background: "rgba(0,0,0,0.2)" }}>
+                      <CountryIntel country={selectedCountry} compact />
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+                        <button
+                          type="button"
+                          disabled={!validTargets.some(t => t.id === selectedCountryId)}
+                          onClick={() => resolveManualWarPairing(selectedCountryId)}
+                          style={validTargets.some(t => t.id === selectedCountryId) ? primaryButtonStyle : disabledButtonStyle}
+                        >
+                          Declare War
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => resolveManualWarPairing(null)}
+                          style={dangerButtonStyle}
+                        >
+                          Skip Attack
+                        </button>
+                      </div>
+                      {!validTargets.some(t => t.id === selectedCountryId) ? (
+                        <p style={warningStyle}>Selected country is not a valid neighboring target.</p>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                      <button
+                        type="button"
+                        onClick={() => resolveManualWarPairing(null)}
+                        style={dangerButtonStyle}
+                      >
+                        Skip Attack (Pass Turn)
+                      </button>
+                    </div>
+                  )}
+
+                  {validTargets.length > 0 ? (
+                    <div style={{ marginTop: 14 }}>
+                      <span style={{ fontSize: 11, color: "#a8b3c2", fontWeight: "bold", textTransform: "uppercase" }}>Valid Targets ({validTargets.length})</span>
+                      <div style={{ display: "grid", gap: 6, maxHeight: "150px", overflowY: "auto", marginTop: 6, paddingRight: 4 }}>
+                        {validTargets.map(target => {
+                          const isSelected = target.id === selectedCountryId;
+                          return (
+                            <button
+                              key={target.id}
+                              type="button"
+                              onClick={() => {
+                                selectCountry(target.id);
+                                focusCountry(target.id);
+                              }}
+                              style={isSelected ? activeModeButtonStyle : modeButtonStyle}
+                            >
+                              {target.flag} {target.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <p style={{ ...copyStyle, color: "#ef4444", marginTop: 10 }}>No valid neighboring targets available this phase.</p>
+                  )}
+                </Panel>
+              );
+            })()
           ) : null}
 
           {stage === "EventHorizon" ? (
@@ -305,7 +425,7 @@ export default function Sidebar({
             </Panel>
           ) : null}
 
-          {stage === "WarSelection" || stage === "Betting" || stage === "Combat" || stage === "CombatResult" || stage === "GameOver" ? (
+          {stage !== "PickScope" && stage !== "PickFavorite" ? (
             <RollLog />
           ) : null}
         </div>
@@ -570,4 +690,25 @@ const warVsButtonSelectedStyle: React.CSSProperties = {
   background: "linear-gradient(180deg, #9d6f30, #583912)",
   color: "#fff1cf",
   boxShadow: "0 0 10px rgba(248, 211, 126, 0.2)",
+};
+
+const modeButtonStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  background: "rgba(255, 255, 255, 0.05)",
+  border: "1px solid rgba(255, 255, 255, 0.15)",
+  color: "#a8b3c2",
+  fontSize: 12,
+  fontWeight: "bold",
+  cursor: "pointer",
+  borderRadius: 4,
+  textAlign: "center",
+  transition: "all 0.18s ease-in-out",
+};
+
+const activeModeButtonStyle: React.CSSProperties = {
+  ...modeButtonStyle,
+  background: "linear-gradient(180deg, #9d6f30, #583912)",
+  border: "1px solid #d6ad63",
+  color: "#fff1cf",
+  boxShadow: "0 0 10px rgba(193, 150, 84, 0.3)",
 };

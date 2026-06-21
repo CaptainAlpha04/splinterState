@@ -19,7 +19,8 @@ export function runMatchmaking(
   activeWars: ActiveWar[],
   rngState: RngState,
   maxWars: number = 5,
-  capitals: MatchmakingCapital[] = []
+  capitals: MatchmakingCapital[] = [],
+  skipAttackerIds?: Set<string>
 ): MatchmakingResult {
   const newWars: ActiveWar[] = [];
   
@@ -51,6 +52,7 @@ export function runMatchmaking(
   for (const attacker of availableCountries) {
     if (newWars.length + activeWars.length >= maxWars) break;
     if (busyCountryIds.has(attacker.id)) continue;
+    if (skipAttackerIds && skipAttackerIds.has(attacker.id)) continue;
 
     const neighborCountryIds = landNeighborIdsByCountry.get(attacker.id) ?? new Set<string>();
 
