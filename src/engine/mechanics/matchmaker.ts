@@ -65,10 +65,8 @@ export function runMatchmaking(
       return c && c.isAlive;
     });
 
-    const navalTargets = neighbors.length === 0
-      ? nearbyNavalTargets(attacker, allAliveCountries, capitals, landNeighborIdsByCountry)
-      : [];
-    const targetPool = neighbors.length > 0 ? neighbors : navalTargets;
+    const navalTargets = nearbyNavalTargets(attacker, allAliveCountries, capitals);
+    const targetPool = Array.from(new Set([...neighbors, ...navalTargets]));
 
     if (targetPool.length > 0) {
       const targetId = targetPool[nextInt(rngState, 0, targetPool.length - 1)];
@@ -118,14 +116,10 @@ function collectLandNeighbors(
 function nearbyNavalTargets(
   attacker: Country,
   availableCountries: Country[],
-  capitals: MatchmakingCapital[],
-  landNeighborIdsByCountry: Map<string, Set<string>>
+  capitals: MatchmakingCapital[]
 ) {
   const attackerCapital = capitals.find(capital => capital.countryId === attacker.id);
   if (!attackerCapital) return [];
-
-  const attackerIsIsolated = (landNeighborIdsByCountry.get(attacker.id)?.size ?? 0) === 0;
-  if (!attackerIsIsolated) return [];
 
   const candidates = availableCountries
     .filter(country => country.id !== attacker.id)
@@ -139,9 +133,9 @@ function nearbyNavalTargets(
     .filter(candidate => Number.isFinite(candidate.distance))
     .sort((a, b) => a.distance - b.distance);
 
-  const nearby = candidates.filter(candidate => candidate.distance <= 3200);
+  const nearby = candidates.filter(candidate => candidate.distance <= 10000);
   return (nearby.length > 0 ? nearby : candidates)
-    .slice(0, 4)
+    .slice(0, 12)
     .map(candidate => candidate.country.id);
 }
 

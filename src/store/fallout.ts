@@ -43,9 +43,20 @@ export function cleanNuclearFallout(
 
     let conquerorId: string | null = null;
     if (previousOwnerId && completedWarResults) {
-      const result = completedWarResults.find(r => r.loserId === previousOwnerId);
-      if (result && result.winnerId) {
-        conquerorId = result.winnerId;
+      let currentOwnerId = previousOwnerId;
+      let depth = 0;
+      while (currentOwnerId && depth < 20) {
+        const result = completedWarResults.find(r => r.loserId === currentOwnerId);
+        if (result && result.winnerId) {
+          currentOwnerId = result.winnerId;
+          if (nextCountries[currentOwnerId]?.isAlive) {
+            conquerorId = currentOwnerId;
+            break;
+          }
+          depth++;
+        } else {
+          break;
+        }
       }
     }
 
@@ -79,12 +90,14 @@ export function cleanNuclearFallout(
       if (countryProvinces[previousOwnerId]) {
         countryProvinces[previousOwnerId] = countryProvinces[previousOwnerId].filter(id => id !== provId);
       }
-      if (countryProvinces[newOwnerId]) {
-        if (!countryProvinces[newOwnerId].includes(provId)) {
-          countryProvinces[newOwnerId].push(provId);
-        }
+    }
+    if (newOwnerId && countryProvinces[newOwnerId]) {
+      if (!countryProvinces[newOwnerId].includes(provId)) {
+        countryProvinces[newOwnerId].push(provId);
       }
-      
+    }
+
+    if (previousOwnerId && previousOwnerId !== newOwnerId) {
       const prevName = nextCountries[previousOwnerId]?.name ?? previousOwnerId;
       const newName = nextCountries[newOwnerId]?.name ?? newOwnerId;
       logs.push(`☢️ Fallout cleared: Province ${province.name || provId} reclaimed by neighbor ${newName} (previously owned by ${prevName}).`);

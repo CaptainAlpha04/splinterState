@@ -546,7 +546,9 @@ export function isRebelSuppressed(suppressedRebelKeys: Record<string, true>, ove
 }
 
 export function reclaimedIndependenceProvinces(winner: Country, loser: Country, provinces: Record<string, Province>) {
-  const homeland = loser.provinces.filter(provinceId => provinces[provinceId]?.initialCountryId === winner.baseId);
+  const homeland = Object.values(provinces)
+    .filter(p => (p.ownerId === loser.id || loser.provinces.includes(p.id)) && p.initialCountryId === winner.baseId)
+    .map(p => p.id);
   if (homeland.length > 0) return homeland;
   return [];
 }
@@ -715,23 +717,21 @@ export function resolveWarTurnState(state: GameState, war: ActiveWar, logs: stri
       }
       stage = activeWars.length > 0 ? "WarSelection" : "CombatResult";
     } else {
-      if (endedByDominance) {
-        countries[resolvedWinnerId] = {
-          ...countries[resolvedWinnerId],
-          provinces: Array.from(new Set([...countries[resolvedWinnerId].provinces, ...countries[loserId].provinces])),
-        };
-        countries[loserId] = { ...countries[loserId], provinces: [] };
-      }
-
       const winner = countries[resolvedWinnerId];
       const loser = countries[loserId];
       const loserStartingProvinceCount = state.countries[loserId]?.provinces.length ?? loser.provinces.length;
+      const loserProvincesFromState = Object.values(state.provinces)
+        .filter(p => p.ownerId === loserId)
+        .map(p => p.id);
+      const mergedProvinces = Array.from(new Set([...winner.provinces, ...loser.provinces, ...loserProvincesFromState]));
+
       const inheritedGovernments = Array.from(new Set([...winner.absorbedGovernments, loser.government, ...loser.absorbedGovernments]));
       const controlledAtThreshold = controlledCountryIdsAtThreshold(winner, countries, state.provinces, 0.7);
       const inheritedCountryIds = Array.from(new Set([...winner.absorbedCountryIds, loser.baseId, ...loser.absorbedCountryIds, ...controlledAtThreshold]));
       const enforcedReligion = winner.religion;
       const formationResult = applyCountryFormation({
         ...winner,
+        provinces: mergedProvinces,
         armyCampsCount: winner.armyCampsCount + loser.armyCampsCount,
         population: winner.population + loser.population,
         area: winner.area + loser.area,
@@ -962,8 +962,8 @@ export function getValidTargetsForCountry(
     .filter(candidate => Number.isFinite(candidate.distance))
     .sort((a, b) => a.distance - b.distance);
 
-  const nearby = candidates.filter(candidate => candidate.distance <= 3200);
-  return (nearby.length > 0 ? nearby : candidates).slice(0, 4).map(c => c.countryId);
+  const nearby = candidates.filter(candidate => candidate.distance <= 10000);
+  return (nearby.length > 0 ? nearby : candidates).slice(0, 12).map(c => c.countryId);
 }
 
 
